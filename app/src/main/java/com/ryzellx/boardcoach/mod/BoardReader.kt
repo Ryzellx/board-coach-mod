@@ -125,6 +125,22 @@ object BoardReader {
     /** Part papan (tanpa " w - - 0 1") dari pembacaan terakhir — untuk auto-learn. */
     @Volatile var lastBoardPart: String = ""
 
+    /** Cek FEN masuk akal: 8 baris, tiap baris 8 petak, ada 1 raja tiap warna. */
+    fun isValidBoardPart(part: String): Boolean {
+        val rows = part.split("/")
+        if (rows.size != 8) return false
+        var wK = 0; var bK = 0
+        for (row in rows) {
+            var n = 0
+            for (ch in row) {
+                if (ch.isDigit()) n += ch - '0'
+                else { n++; if (ch == 'K') wK++; if (ch == 'k') bK++ }
+            }
+            if (n != 8) return false
+        }
+        return wK == 1 && bK == 1
+    }
+
     /** Grid display (dRow, dFile) dari pembacaan terakhir. */
     @Volatile var lastGrid: Array<Array<Char?>>? = null
 

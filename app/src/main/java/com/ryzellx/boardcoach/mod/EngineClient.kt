@@ -178,8 +178,14 @@ class EngineClient(private val context: Context) {
         when {
             line.startsWith("ERR:") -> { if (firstError == null) firstError = line.take(140) }
             line.startsWith("LOG: worker") -> workerMade = true
-            line.startsWith("id ") -> alive = true
-            line.contains("uciok") -> { alive = true; send("isready") }
+            line.startsWith("id ") -> {
+                // Stockfish sudah hidup. Jangan tunggu readyok — handshake
+                // uciok/isready/readyok rapuh (engine tetap mau proses "go").
+                alive = true
+                engineReady = true
+                main.removeCallbacks(watchdog)
+            }
+            line.contains("uciok") -> alive = true
             line.contains("readyok") -> { engineReady = true; main.removeCallbacks(watchdog) }
             line.startsWith("info") || line.contains(" score ") -> parseInfo(line)
             line.startsWith("bestmove") -> {
@@ -211,18 +217,21 @@ class EngineClient(private val context: Context) {
     /** Blocking di thread pemanggil — pakai dari WORKER thread. */
     fun analyze(fen: String, movetime: Int, depth: Int, timeoutMs: Long = 8000): Result? {
         if (!engineReady) return null
-        best = null; lastCp = null; lastPv = null
-        val l = CountDownLatch(1)
-        latch = l
-        send("position fen $fen")
-        send("go movetime $movetime depth $depth")
-        l.await(timeoutMs, TimeUnit.MILLISECONDS)
-        latch = null
-        val b = best ?: run {
-            if (firstError == null) firstError = "timeout movetime=$movetime"
-            return null
+        val wait = maxOf(timeoutMs, movetime * 4L + 4000L)   // asm.js pertama kali lambat
+        repeat(2) { attempt ->
+            best = null; lastCp = null; lastPv = null
+            val l = CountDownLatch(1)
+            latch = l
+            send("position fen $fen")
+            send("go movetime $movetime depth $depth")
+            l.await(wait, TimeUnit.MILLISECONDS)
+            latch = null
+            val b = best
+            if (b != null) return Result(b, lastCp, lastPv)
+            if (attempt == 0) { send("stop"); Thread.sleep(150) }
         }
-        return Result(b, lastCp, lastPv)
+        if (firstError == null) firstError = "timeout movetime=$movetime (msg=$msgCount)"
+        return null
     }
 
     fun analyzeWithSkill(fen: String, skill: Int, movetime: Int, depth: Int, timeoutMs: Long = 8000): Result? {

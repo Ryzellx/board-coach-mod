@@ -641,6 +641,13 @@ class OverlayPanelService : android.app.Service() {
 
         if (fen == lastFen) return
 
+        if (!BoardReader.isValidBoardPart(BoardReader.lastBoardPart)) {
+            lastFen = fen
+            setStatus("FEN tidak valid (raja/bidak salah baca) — tap Belajar ulang di posisi awal")
+            logLine("fen invalid")
+            return
+        }
+
         val prev = lastFen
         val prevBest = lastBest
         val prevCp = lastCp
