@@ -9,20 +9,26 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.WindowManager
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.WebViewAssetLoader
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Klien UCI untuk Stockfish asm.js (assets/stockfish.js).
+ * Klien UCI untuk Stockfish (assets/stockfish.js).
  *
- * v1.5.2 — kenapa engine nyangkut di "engine memuat... (stockfish init)":
- *  1. WebView tidak ditempelkan ke window → renderer dianggap background →
- *     Web Worker ditunda/di-throttle → Stockfish tidak pernah selesai compile.
- *     FIX: WebView ditempel ke WindowManager sebagai jendela 1x1 transparan.
- *  2. "uci" dikirim sekali; kalau hilang tidak ada percobaan ulang.
- *     FIX: watchdog kirim ulang "uci" tiap 4 detik sampai ada balasan.
+ * v1.6.0 — kenapa worker tetap diam walau attach=true:
+ *  Halaman dirakit sebagai satu string HTML raksasa (JS 1.5 MB disisipkan ke
+ *  string) lalu loadDataWithBaseURL. Cara itu rapuh: skrip bisa gagal parse dan
+ *  kita tidak dapat sinyal apa pun.
+ *  FIX: WebViewAssetLoader — engine.html + stockfish.js disajikan dari origin
+ *  https://appassets.androidplatform.net/ (sah), jadi:
+ *    - Worker('stockfish.js') boleh (same-origin https)
+ *    - tidak ada string raksasa yang perlu di-escape
+ *  Plus penghitung pesan supaya kelihatan "ada balasan atau nol".
  */
 class EngineClient(private val context: Context) {
 
@@ -32,9 +38,11 @@ class EngineClient(private val context: Context) {
     private var attached = false
 
     @Volatile private var pageLoaded = false
-    @Volatile private var alive = false        // ada balasan "id name ..."
-    @Volatile private var engineReady = false  // sudah "readyok"
-    @Volatile var lastError: String? = null
+    @Volatile private var workerMade = false
+    @Volatile private var alive = false
+    @Volatile private var engineReady = false
+    @Volatile var msgCount = 0
+    @Volatile private var firstError: String? = null
 
     @Volatile private var lastCp: Double? = null
     @Volatile private var lastPv: String? = null
@@ -48,13 +56,18 @@ class EngineClient(private val context: Context) {
     val isLoaded: Boolean get() = pageLoaded
     val isAlive: Boolean get() = alive
 
+    /** Pesan error pertama (yang paling berguna) untuk panel. */
+    val lastError: String? get() = firstError
+
     private val watchdog = object : Runnable {
         override fun run() {
             if (engineReady || webView == null) return
             watchdogTries++
             send("uci")
-            if (watchdogTries > 8) {
-                lastError = "engine diam (${watchdogTries}x uci, attach=$attached)"
+            if (watchdogTries > 7) {
+                if (firstError == null) {
+                    firstError = "diam (uci=${watchdogTries}x attach=$attached html=$pageLoaded worker=$workerMade msg=$msgCount)"
+                }
                 return
             }
             main.postDelayed(this, 4000)
@@ -64,22 +77,24 @@ class EngineClient(private val context: Context) {
     /** WAJIB dipanggil di main thread. */
     @SuppressLint("SetJavaScriptEnabled")
     fun start() {
-        val sfJs = try {
-            context.assets.open("stockfish.js").readBytes().toString(Charsets.UTF_8)
-        } catch (e: Exception) {
-            lastError = "assets: ${e.javaClass.simpleName}"
-            return
-        }
-
         val wv = WebView(context)
         wv.settings.javaScriptEnabled = true
-        wv.settings.allowFileAccess = true
+        wv.settings.allowFileAccess = false
         wv.settings.domStorageEnabled = true
         wv.addJavascriptInterface(object {
             @JavascriptInterface fun onUci(line: String) { handleLine(line) }
         }, "BCAndroid")
 
+        val loader = WebViewAssetLoader.Builder()
+            .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(context))
+            .build()
+
         wv.webViewClient = object : WebViewClient() {
+            override fun shouldInterceptRequest(
+                view: WebView,
+                request: WebResourceRequest,
+            ): WebResourceResponse? = loader.shouldInterceptRequest(request.url)
+
             override fun onPageFinished(view: WebView?, url: String?) {
                 pageLoaded = true
                 send("uci")
@@ -90,28 +105,12 @@ class EngineClient(private val context: Context) {
             }
         }
 
-        val escaped = sfJs.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
-        val html = "<html><body><script>" +
-            "window.onerror=function(m,s,l){try{BCAndroid.onUci('ERR: '+m+' @'+l)}catch(x){}};" +
-            "try{" +
-            "var S=\"$escaped\";" +
-            "var b=new Blob([S],{type:'application/javascript'});" +
-            "var w=new Worker(URL.createObjectURL(b));" +
-            "w.onmessage=function(e){try{BCAndroid.onUci(String(e.data))}catch(x){}};" +
-            "w.onerror=function(e){try{BCAndroid.onUci('ERR: worker '+(e.message||e))}catch(x){}};" +
-            "window.send=function(c){try{w.postMessage(c)}catch(x){BCAndroid.onUci('ERR: post '+x)}};" +
-            "}catch(e){BCAndroid.onUci('ERR: init '+e);}" +
-            "</script></body></html>"
-        // base URL https (bukan file://) → Blob Worker tidak diblok
-        wv.loadDataWithBaseURL("https://boardcoach.local/", html, "text/html", "utf-8", null)
+        wv.loadUrl("https://appassets.androidplatform.net/assets/engine.html")
         webView = wv
         attachWindow(wv)
     }
 
-    /**
-     * Tempelkan WebView ke WindowManager 1x1 transparan. Tanpa ini, renderer
-     * dianggap tidak terlihat → Web Worker tidak jalan (Stockfish nyangkut).
-     */
+    /** Tempelkan WebView ke WindowManager 1x1 supaya renderer tidak di-throttle. */
     private fun attachWindow(wv: WebView) {
         try {
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -134,7 +133,7 @@ class EngineClient(private val context: Context) {
             attached = true
         } catch (e: Throwable) {
             attached = false
-            lastError = "attach: ${e.javaClass.simpleName}"
+            if (firstError == null) firstError = "attach: ${e.javaClass.simpleName}"
         }
     }
 
@@ -159,8 +158,10 @@ class EngineClient(private val context: Context) {
     }
 
     private fun handleLine(line: String) {
-        if (line.startsWith("ERR:")) { lastError = line.take(140); return }
+        msgCount++
         when {
+            line.startsWith("ERR:") -> { if (firstError == null) firstError = line.take(140) }
+            line.startsWith("LOG: worker") -> workerMade = true
             line.startsWith("id ") -> alive = true
             line.startsWith("uciok") -> { alive = true; send("isready") }
             line.startsWith("readyok") -> { engineReady = true; main.removeCallbacks(watchdog) }
@@ -201,7 +202,10 @@ class EngineClient(private val context: Context) {
         send("go movetime $movetime depth $depth")
         l.await(timeoutMs, TimeUnit.MILLISECONDS)
         latch = null
-        val b = best ?: run { lastError = "timeout movetime=$movetime"; return null }
+        val b = best ?: run {
+            if (firstError == null) firstError = "timeout movetime=$movetime"
+            return null
+        }
         return Result(b, lastCp, lastPv)
     }
 

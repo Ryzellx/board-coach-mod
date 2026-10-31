@@ -11,8 +11,8 @@ android {
         applicationId = "com.ryzellx.boardcoach.mod"
         minSdk = 26
         targetSdk = 34
-        versionCode = 12
-        versionName = "1.5.2"
+        versionCode = 13
+        versionName = "1.6.0"
     }
 
     buildTypes {
@@ -32,4 +32,5 @@ android {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.webkit:webkit:1.11.0")
 }

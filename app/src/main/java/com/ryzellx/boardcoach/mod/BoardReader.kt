@@ -97,7 +97,7 @@ object BoardReader {
                 disp[dr][df] = PieceTemplates.classifyDisplay(bp, df, dr)
             }
         }
-        detectFlip(disp)?.let { flipped = it }
+        detectOrientation(bp, disp)?.let { flipped = it }
         lastGrid = disp
 
         val sb = StringBuilder()
@@ -127,6 +127,33 @@ object BoardReader {
 
     /** Grid display (dRow, dFile) dari pembacaan terakhir. */
     @Volatile var lastGrid: Array<Array<Char?>>? = null
+
+    /**
+     * Orientasi dari KECERAHAN bidak (bukan jenis bidak yang bisa salah):
+     * bidak putih selalu lebih terang. Hanya diputuskan kalau papan sedang
+     * di posisi awal (2 baris pinggir terisi penuh) — jadi tidak salah tebak.
+     * Ini yang bikin panah dulu muncul di sisi musuh.
+     */
+    private fun detectOrientation(bp: BoardPixels, disp: Array<Array<Char?>>): Boolean? {
+        var topSum = 0.0; var topN = 0
+        var botSum = 0.0; var botN = 0
+        for (df in 0 until SIZE) {
+            for (dr in 0..1) {
+                val ex = PieceTemplates.extract(bp, df, dr)
+                if (ex.fill >= 0.06f) { topSum += ex.luma; topN++ }
+            }
+            for (dr in 6..7) {
+                val ex = PieceTemplates.extract(bp, df, dr)
+                if (ex.fill >= 0.06f) { botSum += ex.luma; botN++ }
+            }
+        }
+        if (topN < 6 || botN < 6) return null
+        val tl = topSum / topN
+        val bl = botSum / botN
+        if (bl - tl > 25) return false   // putih di bawah → normal
+        if (tl - bl > 25) return true    // putih di atas → papan diputar
+        return null
+    }
 
     /** Orientasi otomatis: putih di 2 baris atas → papan diputar. */
     private fun detectFlip(disp: Array<Array<Char?>>): Boolean? {
