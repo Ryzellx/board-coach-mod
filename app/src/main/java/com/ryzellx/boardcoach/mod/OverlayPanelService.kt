@@ -47,6 +47,8 @@ class OverlayPanelService : android.app.Service() {
     private var moveDelay = 600L
     private var lastFen: String? = null
     private var lastBest: String? = null
+    private var statusView: TextView? = null
+    private var logView: TextView? = null
     private var pollToken = 0
     private val stats = Classifier.emptyStats()
     private var lossSum = 0.0
@@ -67,46 +69,78 @@ class OverlayPanelService : android.app.Service() {
         if (intent?.action == "stop") {
             stopSelf(); return START_NOT_STICKY
         }
+        try {
+            startAsForeground()
+            if (panel == null) buildPanel()
+            ensureArrowOverlay()
+            pendingProjection?.let { (rc, data) ->
+                pendingProjection = null
+                attachProjection(rc, data)
+            }
+            scanRunning = true
+            startScan()
+            setStatus(if (capture == null) "butuh izin capture — tap tombol 4" else "jalan")
+        } catch (e: Throwable) {
+            CrashLogger.log(this, "onStartCommand", e)
+            setStatus("gagal start: ${e.javaClass.simpleName}")
+        }
+        return START_STICKY
+    }
+
+    private fun startAsForeground() {
+        val nm = getSystemService(android.app.NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) {
-            val ch = android.app.NotificationChannel("bc", "Board Coach", android.app.NotificationManager.IMPORTANCE_LOW)
-            getSystemService(android.app.NotificationManager::class.java).createNotificationChannel(ch)
-            startForeground(1, android.app.Notification.Builder(this, "bc")
+            nm.createNotificationChannel(
+                android.app.NotificationChannel("bc", "Board Coach", android.app.NotificationManager.IMPORTANCE_LOW))
+        }
+        val notif = if (Build.VERSION.SDK_INT >= 26)
+            android.app.Notification.Builder(this, "bc")
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
                 .setContentTitle("Board Coach")
                 .setContentText("Mod menu aktif")
-                .build())
-        }
+                .build()
+        else
+            @Suppress("DEPRECATION")
+            android.app.Notification.Builder(this)
+                .setSmallIcon(android.R.drawable.ic_menu_compass)
+                .setContentTitle("Board Coach")
+                .setContentText("Mod menu aktif")
+                .build()
 
-        if (panel == null) buildPanel()
-        ensureArrowOverlay()
-        // ambil projection kalau user baru saja memberi izin
-        pendingProjection?.let { (rc, data) ->
-            pendingProjection = null
-            attachProjection(rc, data)
+        if (Build.VERSION.SDK_INT >= 34) {
+            androidx.core.app.ServiceCompat.startForeground(
+                this, 1, notif,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } else {
+            startForeground(1, notif)
         }
-        if (capture == null) requestCapture()
-        scanRunning = true
-        startScan()
-        return START_STICKY
     }
 
     private fun captureStarted(): Boolean = capture != null
 
     private fun requestCapture() {
-        // permission result dikembalikan lewat MainActivity → pendingProjection
+        // dipakai manual dari MainActivity; service tidak memicu activity sendiri
+        // (background activity start diblokir Android 10+).
         val intent = Intent(this, MainActivity::class.java)
         intent.action = "request_capture"
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         startActivity(intent)
     }
 
-    /** Dipanggil dari MainActivity setelah user memberi izin. */
-    fun attachProjection(resultCode: Int, data: Intent) {
-        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val projection = mpm.getMediaProjection(resultCode, data)
-        capture?.stop()
-        capture = ScreenCapture(this, projection)
-        capture?.start()
+    private fun attachProjection(resultCode: Int, data: Intent) {
+        try {
+            val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            val projection = mpm.getMediaProjection(resultCode, data)
+            capture?.stop()
+            capture = ScreenCapture(this, projection)
+            capture?.start()
+            setStatus("capture aktif — baca papan")
+        } catch (e: Throwable) {
+            CrashLogger.log(this, "attachProjection", e)
+            capture = null
+            setStatus("capture gagal: ${e.javaClass.simpleName}")
+        }
     }
 
     /* ---------------- UI ---------------- */
@@ -124,6 +158,7 @@ class OverlayPanelService : android.app.Service() {
         // status
         val status = TextView(this).apply { text = "status: idle" }
         panel.addView(status)
+        statusView = status
 
         // ELO row
         panel.addView(TextView(this).apply { text = "ELO target" })
@@ -161,6 +196,7 @@ class OverlayPanelService : android.app.Service() {
             isVerticalScrollBarEnabled = true
         }
         panel.addView(log, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 140))
+        logView = log
 
         val scroll = ScrollView(this)
         scroll.addView(panel)
@@ -226,6 +262,22 @@ class OverlayPanelService : android.app.Service() {
         isSelected = false
     }
 
+    /** Update baris status di panel (aman dipanggil dari thread mana pun). */
+    private fun setStatus(s: String) {
+        handler.post {
+            statusView?.text = "status: $s"
+        }
+    }
+
+    /** Tambah baris ke log panel, maksimum 8 baris. */
+    private fun logLine(s: String) {
+        handler.post {
+            val v = logView ?: return@post
+            val lines = (v.text.toString().split("\n") + s).filter { it.isNotBlank() }
+            v.text = lines.takeLast(8).joinToString("\n")
+        }
+    }
+
     private fun ensureArrowOverlay() {
         if (arrowOverlay != null) return
         val view = ArrowOverlayView(this)
@@ -271,11 +323,8 @@ class OverlayPanelService : android.app.Service() {
         val changed = BoardCalibrator.fenChanged(lastFen ?: "", fen)
         if (changed) {
             lastFen = fen
-            if (engineOn) {
-                requestMove(fen)
-            }
-        } else if (engineOn && bestMoveShown) {
-            // tidak ada perubahan — jangan gambarkan ulang
+            logLine("fen ${fen.take(24)}")
+            if (engineOn) requestMove(fen)
         }
     }
 
@@ -289,6 +338,7 @@ class OverlayPanelService : android.app.Service() {
         val mv = eng.bestMove(fen, prof.movetime, prof.depth) ?: return
         lastBest = mv
         bestMoveShown = true
+        logLine("best $mv")
         if (mv.length >= 4) {
             val from = mv.substring(0, 2)
             val to = mv.substring(2, 4)

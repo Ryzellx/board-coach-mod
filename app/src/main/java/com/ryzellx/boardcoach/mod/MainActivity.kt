@@ -20,6 +20,7 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        CrashLogger.install(applicationContext)
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -94,6 +95,21 @@ class MainActivity : Activity() {
         }
         btn("Stop mod") {
             startService(Intent(this, OverlayPanelService::class.java).setAction("stop"))
+        }
+        btn("Kirim log crash") {
+            val f = java.io.File(CrashLogger.path(this))
+            if (!f.exists()) {
+                Toast.makeText(this, "belum ada log crash", Toast.LENGTH_SHORT).show()
+            } else {
+                val uri = androidx.core.content.FileProvider.getUriForFile(
+                    this, "$packageName.fileprovider", f)
+                startActivity(Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }, "Kirim log crash"))
+            }
         }
 
         setContentView(root)
