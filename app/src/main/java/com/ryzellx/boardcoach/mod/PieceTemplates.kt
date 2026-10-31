@@ -17,6 +17,18 @@ object PieceTemplates {
     private const val THRESH = 110
     private const val MIN_FILL = 0.06f
 
+    /** Warna panah overlay — diabaikan saat membaca petak (biar panah tidak dianggap bidak). */
+    private val ARROW_COLORS = arrayOf(
+        intArrayOf(34, 197, 94), intArrayOf(239, 68, 68), intArrayOf(56, 189, 248), intArrayOf(129, 182, 76),
+    )
+
+    private fun isArrowColor(r: Int, g: Int, b: Int): Boolean {
+        for (c in ARROW_COLORS) {
+            if (Math.abs(r - c[0]) + Math.abs(g - c[1]) + Math.abs(b - c[2]) < 90) return true
+        }
+        return false
+    }
+
     private val templates = HashMap<String, FloatArray>()
 
     @Volatile var lastConfidence: Float = 0f
@@ -68,7 +80,7 @@ object PieceTemplates {
                 val g = c shr 8 and 0xFF
                 val b = c and 0xFF
                 val d = Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB)
-                if (d > THRESH) {
+                if (d > THRESH && !isArrowColor(r, g, b)) {
                     mask[gy * N + gx] = 1f
                     cnt++
                     lumaSum += (r * 299 + g * 587 + b * 114) / 1000

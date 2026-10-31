@@ -2,6 +2,7 @@ package com.ryzellx.boardcoach.mod
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.media.projection.MediaProjectionManager
@@ -19,6 +20,8 @@ import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Service overlay: panel mod menu + panah + capture + engine.
@@ -66,6 +69,8 @@ class OverlayPanelService : android.app.Service() {
     @Volatile private var elo = 1400
     @Volatile private var scanToken = 0
     @Volatile private var captureError: String? = null
+    @Volatile private var shotSource: String = "belum"
+    private var lastSource: String = ""
 
     private var moveDelay = 600L
     private var lastFen: String? = null
@@ -561,10 +566,53 @@ class OverlayPanelService : android.app.Service() {
         })
     }
 
-    private fun tick() {
-        val cap = capture ?: return
-        val bmp = cap.grab() ?: return
+    /**
+     * Ambil frame layar. Prioritas: AccessibilityService.takeScreenshot()
+     * (tanpa izin capture, tanpa MediaProjection). Fallback: MediaProjection.
+     */
+    private fun grabFrame(): Bitmap? {
+        val svc = BoardReaderService.service
+        if (svc != null && svc.canShot) {
+            val latch = CountDownLatch(1)
+            var out: Bitmap? = null
+            svc.screenshot { b -> out = b; latch.countDown() }
+            latch.await(2500, TimeUnit.MILLISECONDS)
+            if (out != null) { shotSource = "aksesibilitas"; return out }
+        }
+        val c = capture ?: return null
+        val b = c.grab()
+        if (b != null) shotSource = "projection"
+        return b
+    }
 
+    /** Kalau panel menutupi papan, geser panel ke pojok. */
+    private fun maybeMovePanel(board: Rect) {
+        main.post {
+            val root = panelRoot ?: return@post
+            val p = panelParams ?: return@post
+            val h = root.height
+            if (h <= 0) return@post
+            val pr = Rect(p.x, p.y, p.x + p.width, p.y + h)
+            if (Rect.intersects(pr, board)) {
+                p.x = dp(4); p.y = dp(4)
+                runCatching { wm.updateViewLayout(root, p) }
+                logLine("panel digeser (nutup papan)")
+            }
+        }
+    }
+
+    private fun tick() {
+        val bmp = grabFrame() ?: run {
+            val svc = BoardReaderService.service
+            if (svc == null) setStatus("butuh Aksesibilitas (untuk baca layar)")
+            else if (BoardReaderService.lastShotError != null) setStatus("screenshot gagal — ${BoardReaderService.lastShotError}")
+            else setStatus("menunggu frame…")
+            return
+        }
+        if (lastFen == null || shotSource != lastSource) {
+            lastSource = shotSource
+            setStatus("sumber gambar: $shotSource")
+        }
         var rect = calibrator.rect
         if (rect == null) {
             if (locateTries >= 25) { setStatus("papan tidak ketemu — tap Kalibrasi manual"); return }
@@ -574,6 +622,7 @@ class OverlayPanelService : android.app.Service() {
             calibrator.calibrate(hit.rect)
             rect = hit.rect
             logLine("auto-papan ${(hit.score * 100).toInt()}%")
+            maybeMovePanel(hit.rect)
         }
         val board = rect!!
 
