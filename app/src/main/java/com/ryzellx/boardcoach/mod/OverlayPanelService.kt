@@ -363,7 +363,14 @@ class OverlayPanelService : android.app.Service() {
                 setStatus(if (BoardReader.flipped) "papan diputar (main hitam)" else "papan normal")
             }
         }
-        listOf(learnBtn, flipChip).forEach {
+        val testBtn = TextView(this).apply {
+            text = "Tes panah"; textSize = 11f
+            setPadding(dp(6), dp(8), dp(6), dp(8))
+            setBackgroundResource(com.ryzellx.boardcoach.mod.R.drawable.bg_button)
+            setTextColor(0xFFE2E8F0.toInt())
+            setOnClickListener { testArrow() }
+        }
+        listOf(learnBtn, flipChip, testBtn).forEach {
             it.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
                     .apply { marginEnd = dp(4) }
             btnRow2.addView(it)
@@ -646,8 +653,10 @@ class OverlayPanelService : android.app.Service() {
     private fun drawArrow(from: String, to: String, color: Int) {
         val f = from[0] - 'a'; val r = from[1] - '1'
         val t = to[0] - 'a'; val tr = to[1] - '1'
-        val s1 = calibrator.squareCenter(f, r) ?: return
-        val s2 = calibrator.squareCenter(t, tr) ?: return
+        val s1 = calibrator.squareCenter(f, r, BoardReader.flipped) ?: run {
+            logLine("panah gagal: papan belum terdeteksi"); return
+        }
+        val s2 = calibrator.squareCenter(t, tr, BoardReader.flipped) ?: return
         main.post {
             arrowView?.setArrows(listOf(ArrowOverlayView.Arrow(
                 s1.first.toFloat(), s1.second.toFloat(),
@@ -655,11 +664,19 @@ class OverlayPanelService : android.app.Service() {
         }
     }
 
+    /** Tombol tes: gambar panah contoh (e2e4) supaya kelihatan overlay-nya hidup. */
+    private fun testArrow() {
+        if (calibrator.rect == null) { setStatus("tes panah: papan belum terdeteksi"); return }
+        drawArrow("e2", "e4", 0xFF38BDF8.toInt())
+        setStatus("tes panah digambar (e2e4)")
+        logLine("tes panah")
+    }
+
     private fun scheduleAutoMove(from: String, to: String) {
         val svc = BoardReaderService.service ?: return
         main.postDelayed({
-            val s1 = calibrator.squareCenter(from[0] - 'a', from[1] - '1') ?: return@postDelayed
-            val s2 = calibrator.squareCenter(to[0] - 'a', to[1] - '1') ?: return@postDelayed
+            val s1 = calibrator.squareCenter(from[0] - 'a', from[1] - '1', BoardReader.flipped) ?: return@postDelayed
+            val s2 = calibrator.squareCenter(to[0] - 'a', to[1] - '1', BoardReader.flipped) ?: return@postDelayed
             lastAutoMove = from + to
             svc.tap(s1.first, s1.second)
             main.postDelayed({ svc.tap(s2.first, s2.second) }, 140)

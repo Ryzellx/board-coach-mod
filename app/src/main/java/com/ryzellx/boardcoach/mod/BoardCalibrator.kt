@@ -21,12 +21,14 @@ class BoardCalibrator {
 
     fun clear() { boardRect = null }
 
-    /** Konversi petak → titik pusat layar. @@=0..7 (a=0), rank=0..7 (rank1=0). */
-    fun squareCenter(file: Int, rank: Int): Pair<Int, Int>? {
+    /** Konversi petak → titik pusat layar. flip = papan diputar. */
+    fun squareCenter(file: Int, rank: Int, flip: Boolean = false): Pair<Int, Int>? {
         val r = boardRect ?: return null
         val side = r.width().toDouble() / 8
-        val x = r.left + (file + 0.5) * side
-        val y = r.top + (7 - rank + 0.5) * side
+        val f = if (flip) 7 - file else file
+        val row = if (flip) rank else 7 - rank
+        val x = r.left + (f + 0.5) * side
+        val y = r.top + (row + 0.5) * side
         return x.toInt() to y.toInt()
     }
 
