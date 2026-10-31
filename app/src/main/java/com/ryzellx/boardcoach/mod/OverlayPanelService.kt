@@ -31,7 +31,7 @@ import android.graphics.Bitmap
 class OverlayPanelService : android.app.Service() {
 
     private lateinit var wm: WindowManager
-    private var panel: LinearLayout? = null
+    private var panel: View? = null
     private var chevron: FrameLayout? = null
     private var arrowOverlay: FrameLayout? = null
     private var arrowView: ArrowOverlayView? = null
@@ -114,7 +114,7 @@ class OverlayPanelService : android.app.Service() {
     private fun buildPanel() {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = getDrawable(com.ryzellx.boardcoach.R.drawable.bg_panel)
+            background = getDrawable(com.ryzellx.boardcoach.mod.R.drawable.bg_panel)
             setPadding(14, 10, 14, 14)
         }
 
@@ -189,7 +189,7 @@ class OverlayPanelService : android.app.Service() {
 
         // chevron (minimized)
         val ch = FrameLayout(this).apply {
-            background = getDrawable(com.ryzellx.boardcoach.R.drawable.bg_button)
+            background = getDrawable(com.ryzellx.boardcoach.mod.R.drawable.bg_button)
         }
         val chTxt = TextView(this).apply { text = "♞"; textSize = 24f }
         ch.addView(chTxt, FrameLayout.LayoutParams(70, 70, Gravity.CENTER))
@@ -220,7 +220,7 @@ class OverlayPanelService : android.app.Service() {
 
     private fun makeToggle(s: String): TextView = TextView(this).apply {
         text = "• $s"
-        setBackgroundResource(com.ryzellx.boardcoach.R.drawable.bg_button)
+        setBackgroundResource(com.ryzellx.boardcoach.mod.R.drawable.bg_button)
         setPadding(14, 10, 14, 10)
         setTextColor(0xFFE2E8F0.toInt())
         isSelected = false
