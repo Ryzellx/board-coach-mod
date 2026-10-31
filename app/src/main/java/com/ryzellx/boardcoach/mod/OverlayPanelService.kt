@@ -139,10 +139,8 @@ class OverlayPanelService : android.app.Service() {
 
     private fun attachProjection(resultCode: Int, data: Intent) {
         try {
-            val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            val projection = mpm.getMediaProjection(resultCode, data)
-            // API 34: foreground service HARUS punya type mediaProjection
-            // SEBELUM createVirtualDisplay, kalau tidak → SecurityException.
+            // Android 14/15/16: FGS WAJIB sudah bertipe mediaProjection SEBELUM
+            // token dipakai (createVirtualDisplay), kalau tidak → SecurityException.
             if (Build.VERSION.SDK_INT >= 29) {
                 runCatching {
                     startAsForeground(
@@ -150,15 +148,34 @@ class OverlayPanelService : android.app.Service() {
                         android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
                 }
             }
+            val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+            val projection = mpm.getMediaProjection(resultCode, data)
             capture?.stop()
             capture = ScreenCapture(this, projection).also { it.start() }
             captureError = null
-            setStatus("capture aktif — baca papan")
+            setStatus("capture terpasang — uji frame…")
+            // self-test: pastikan frame benar-benar bisa diambil
+            work.post {
+                var bmp: android.graphics.Bitmap? = null
+                var tries = 0
+                while (bmp == null && tries < 10 && scanRunning) {
+                    bmp = runCatching { capture?.grab() }.getOrNull()
+                    if (bmp == null) { Thread.sleep(150); tries++ }
+                }
+                if (bmp != null) {
+                    setStatus("capture OK ${bmp.width}x${bmp.height}")
+                    logLine("capture ok ${bmp.width}x${bmp.height}")
+                } else {
+                    setStatus("capture terpasang tapi frame kosong")
+                    logLine("capture frame kosong")
+                }
+            }
         } catch (e: Throwable) {
             CrashLogger.log(this, "attachProjection", e)
             capture = null
-            captureError = "${e.javaClass.simpleName}: ${e.message?.take(60) ?: ""}"
+            captureError = "${e.javaClass.simpleName}: ${e.message?.take(70) ?: ""}"
             setStatus("capture gagal — $captureError")
+            logLine("capture gagal ${e.javaClass.simpleName}")
         }
     }
 
