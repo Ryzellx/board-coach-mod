@@ -156,11 +156,11 @@ object BoardReader {
         for (df in 0 until SIZE) {
             for (dr in 0..1) {
                 val ex = PieceTemplates.extract(bp, df, dr)
-                if (ex.fill >= 0.06f) { topSum += ex.luma; topN++ }
+                if (ex.fill >= 0.06f) { topSum += ex.maxLuma; topN++ }
             }
             for (dr in 6..7) {
                 val ex = PieceTemplates.extract(bp, df, dr)
-                if (ex.fill >= 0.06f) { botSum += ex.luma; botN++ }
+                if (ex.fill >= 0.06f) { botSum += ex.maxLuma; botN++ }
             }
         }
         if (topN < 6 || botN < 6) return null

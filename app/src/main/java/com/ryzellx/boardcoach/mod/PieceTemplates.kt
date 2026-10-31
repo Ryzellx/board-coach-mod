@@ -14,7 +14,9 @@ import android.graphics.Rect
 object PieceTemplates {
 
     const val N = 16
-    private const val THRESH = 110
+    // 60 (bukan 110): bidak PUTIH di petak TERANG hanya beda ~86 dari latarnya,
+    // ambang 110 membuat bidak putih tidak terdeteksi sama sekali.
+    private const val THRESH = 60
     private const val MIN_FILL = 0.06f
 
     /** Warna panah overlay — diabaikan saat membaca petak (biar panah tidak dianggap bidak). */
@@ -37,7 +39,7 @@ object PieceTemplates {
     fun learnedCount(): Int = templates.size
     fun clear() { templates.clear(); lastConfidence = 0f }
 
-    data class Sq(val mask: FloatArray, val fill: Float, val luma: Int)
+    data class Sq(val mask: FloatArray, val fill: Float, val luma: Int, val maxLuma: Int)
 
     /* ---------- geometri (koordinat DISPLAY: dRow 0 = atas layar) ---------- */
 
@@ -67,14 +69,17 @@ object PieceTemplates {
         val mask = FloatArray(N * N)
         var cnt = 0
         var lumaSum = 0L
-        val stepX = sq.width().toDouble() / N
-        val stepY = sq.height().toDouble() / N
+        var maxLuma = 0
+        // sampling di area dalam petak (10%..90%) supaya garis batas tidak ikut terhitung
+        val pad = sq.width() * 0.10
+        val inner = sq.width() - 2 * pad
+        val step = inner / N
 
         for (gy in 0 until N) {
             for (gx in 0 until N) {
                 val c = bp.at(
-                    sq.left + ((gx + 0.5) * stepX).toInt(),
-                    sq.top + ((gy + 0.5) * stepY).toInt(),
+                    sq.left + (pad + gx * step).toInt(),
+                    sq.top + (pad + gy * step).toInt(),
                 )
                 val r = c shr 16 and 0xFF
                 val g = c shr 8 and 0xFF
@@ -83,11 +88,13 @@ object PieceTemplates {
                 if (d > THRESH && !isArrowColor(r, g, b)) {
                     mask[gy * N + gx] = 1f
                     cnt++
-                    lumaSum += (r * 299 + g * 587 + b * 114) / 1000
+                    val lum = (r * 299 + g * 587 + b * 114) / 1000
+                    lumaSum += lum
+                    if (lum > maxLuma) maxLuma = lum
                 }
             }
         }
-        return Sq(mask, cnt.toFloat() / (N * N), if (cnt > 0) (lumaSum / cnt).toInt() else 0)
+        return Sq(mask, cnt.toFloat() / (N * N), if (cnt > 0) (lumaSum / cnt).toInt() else 0, maxLuma)
     }
 
     /* ---------- klasifikasi (koordinat display) ---------- */
@@ -95,7 +102,9 @@ object PieceTemplates {
     fun classifyDisplay(bp: BoardPixels, dFile: Int, dRow: Int): Char? {
         val ex = extract(bp, dFile, dRow)
         if (ex.fill < MIN_FILL) return null
-        val color = if (ex.luma > 150) 'w' else 'b'
+        // maxLuma lebih andal daripada rata-rata: bidak putih di petak terang
+        // tetap punya piksel terang, sedangkan rata-rata bisa tertarik outline gelap.
+        val color = if (ex.maxLuma > 165) 'w' else 'b'
 
         if (!isLearned()) {
             val t = when {
@@ -156,7 +165,7 @@ object PieceTemplates {
         templates.clear()
         for ((k, sum) in acc) {
             val c = n[k] ?: 0
-            if (c < 2) continue
+            if (c < 1) continue
             for (i in sum.indices) sum[i] /= c
             templates[k] = sum
         }
