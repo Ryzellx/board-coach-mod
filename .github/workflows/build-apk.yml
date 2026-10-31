@@ -22,20 +22,25 @@ jobs:
 
       - name: Ensure Android SDK platform + build-tools
         run: |
-          # runner GitHub sudah punya SDK preinstalled; pastikan angka-34 + bt 34 ada
           SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
           [ -x "$SDKM" ] || SDKM="$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager"
           yes | "$SDKM" --licenses >/dev/null 2>&1 || true
           "$SDKM" "platforms;android-34" "build-tools;34.0.0"
           ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools"
 
-      - name: Build debug APK (bootstrap gradle)
+      - name: Build release APK (kunci tetap → update tidak bentrok)
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+          ./gradlew :app:assembleRelease --no-daemon --stacktrace
+
+      - name: Verify signature (fingerprint harus selalu sama)
+        run: |
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/34.0.0)
+          "$BT/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk \
+            | grep -i "SHA-1" || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: boardcoach-mod
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/release/app-release.apk

@@ -11,13 +11,29 @@ android {
         applicationId = "com.ryzellx.boardcoach.mod"
         minSdk = 26
         targetSdk = 34
-        versionCode = 13
-        versionName = "1.6.0"
+        versionCode = 14
+        versionName = "1.7.0"
+    }
+
+    // Kunci TETAP (disimpan di repo) supaya update tidak bentrok tanda tangan.
+    // Kalau kuncinya berubah, Android menolak install ("App not installed").
+    signingConfigs {
+        create("stable") {
+            storeFile = file("../keystore/boardcoach.p12")
+            storePassword = "boardcoach2026"
+            keyAlias = "boardcoach"
+            keyPassword = "boardcoach2026"
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("stable")
+        }
+        debug {
+            // debug pakai kunci yang sama → build debug & release bisa saling update
+            signingConfig = signingConfigs.getByName("stable")
         }
     }
 
