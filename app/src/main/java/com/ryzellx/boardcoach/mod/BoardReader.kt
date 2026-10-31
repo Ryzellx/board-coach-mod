@@ -88,36 +88,25 @@ object BoardReader {
         return readFenFrom(bitmap, board)
     }
 
-    /** Baca FEN dengan rect papan eksplisit (hasil kalibrasi manual). */
+    /** Baca FEN dari rect papan. Orientasi (diputar/nggak) dideteksi otomatis. */
     fun readFenFrom(bitmap: Bitmap, board: android.graphics.Rect): String {
-        val useTmpl = PieceTemplates.isLearned()
-        val side = board.width().toDouble() / SIZE
-        // grid[displayRow][displayFile] — displayRow 0 = atas layar
-        val grid = Array(SIZE) { arrayOfNulls<Char>(SIZE) }
-
+        val bp = BoardPixels(bitmap, board)
+        val disp = Array(SIZE) { arrayOfNulls<Char>(SIZE) }
         for (dr in 0 until SIZE) {
             for (df in 0 until SIZE) {
-                val af = if (flipped) 7 - df else df
-                val ar = if (flipped) dr else 7 - dr
-                val pc: Char? = if (useTmpl) {
-                    PieceTemplates.classifyChar(bitmap, board, af, ar, flipped)
-                } else {
-                    val cx = board.left + (df + 0.5) * side
-                    val cy = board.top + (dr + 0.5) * side
-                    classifySquare(bitmap, cx.toInt(), cy.toInt(), side.toInt())?.toFenChar()
-                }
-                grid[dr][df] = pc
+                disp[dr][df] = PieceTemplates.classifyDisplay(bp, df, dr)
             }
         }
+        detectFlip(disp)?.let { flipped = it }
+        lastGrid = disp
 
-        // susun FEN: selalu mulai dari rank 8
         val sb = StringBuilder()
         for (arRow in 0 until SIZE) {
             var empty = 0
             for (af in 0 until SIZE) {
                 val df = if (flipped) 7 - af else af
                 val dr = if (flipped) 7 - arRow else arRow
-                val pc = grid[dr][df]
+                val pc = disp[dr][df]
                 if (pc == null) {
                     empty++
                 } else {
@@ -128,8 +117,28 @@ object BoardReader {
             if (empty > 0) sb.append(empty)
             if (arRow < SIZE - 1) sb.append('/')
         }
-        sb.append(" w - - 0 1")
-        return sb.toString()
+        val boardPart = sb.toString()
+        lastBoardPart = boardPart
+        return "$boardPart w - - 0 1"
+    }
+
+    /** Part papan (tanpa " w - - 0 1") dari pembacaan terakhir — untuk auto-learn. */
+    @Volatile var lastBoardPart: String = ""
+
+    /** Grid display (dRow, dFile) dari pembacaan terakhir. */
+    @Volatile var lastGrid: Array<Array<Char?>>? = null
+
+    /** Orientasi otomatis: putih di 2 baris atas → papan diputar. */
+    private fun detectFlip(disp: Array<Array<Char?>>): Boolean? {
+        var topW = 0; var topB = 0; var botW = 0; var botB = 0
+        for (df in 0 until SIZE) {
+            for (dr in 0..1) disp[dr][df]?.let { if (it.isUpperCase()) topW++ else topB++ }
+            for (dr in 6..7) disp[dr][df]?.let { if (it.isUpperCase()) botW++ else botB++ }
+        }
+        if (topW + topB + botW + botB < 8) return null
+        if (botW >= topW + 4) return false
+        if (topW >= botW + 4) return true
+        return null
     }
 
     private fun Piece.toFenChar(): Char =

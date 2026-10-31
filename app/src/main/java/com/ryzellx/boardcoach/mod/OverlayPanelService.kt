@@ -60,7 +60,7 @@ class OverlayPanelService : android.app.Service() {
     private val stats = MoveStats()
 
     @Volatile private var scanRunning = false
-    @Volatile private var engineOn = false
+    @Volatile private var engineOn = true
     @Volatile private var autoMove = false
     @Volatile private var arrowsOn = true
     @Volatile private var elo = 1400
@@ -73,6 +73,7 @@ class OverlayPanelService : android.app.Service() {
     private var lastAutoMove: String? = null
     private var statsVisible = false
     private var widthIdx = 1
+    private var locateTries = 0
 
     companion object {
         var pendingProjection: Pair<Int, Intent>? = null
@@ -94,6 +95,7 @@ class OverlayPanelService : android.app.Service() {
             startAsForeground()
             ensureArrowOverlay()
             if (panelRoot == null) buildPanel()
+            if (engineOn) ensureEngine()
             pendingProjection?.let { (rc, data) ->
                 pendingProjection = null
                 attachProjection(rc, data)
@@ -292,7 +294,7 @@ class OverlayPanelService : android.app.Service() {
 
         val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val calBtn = TextView(this).apply {
-            text = "Kalibrasi papan"; textSize = 12f
+            text = "Kalibrasi manual"; textSize = 12f
             setPadding(dp(10), dp(8), dp(10), dp(8))
             setBackgroundResource(com.ryzellx.boardcoach.mod.R.drawable.bg_button)
             setTextColor(0xFFE2E8F0.toInt())
@@ -318,13 +320,13 @@ class OverlayPanelService : android.app.Service() {
 
         val btnRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val learnBtn = TextView(this).apply {
-            text = "Belajar bidak"; textSize = 12f
+            text = "Belajar ulang"; textSize = 12f
             setPadding(dp(10), dp(8), dp(10), dp(8))
             setBackgroundResource(com.ryzellx.boardcoach.mod.R.drawable.bg_button)
             setTextColor(0xFFE2E8F0.toInt())
             setOnClickListener { learnPieces() }
         }
-        val flipChip = chip("Papan diputar", BoardReader.flipped).apply {
+        val flipChip = chip("Putar manual", BoardReader.flipped).apply {
             setOnClickListener {
                 BoardReader.flipped = !BoardReader.flipped
                 updateChip(this, BoardReader.flipped)
@@ -423,7 +425,7 @@ class OverlayPanelService : android.app.Service() {
             try {
                 val bmp = cap.grab()
                 if (bmp == null) { setStatus("gagal ambil frame"); return@post }
-                val n = PieceTemplates.learn(bmp, rect)
+                val n = PieceTemplates.learn(BoardPixels(bmp, rect), BoardReader.flipped)
                 setStatus(if (n >= 10) "bidak dipelajari: $n/12 — siap" else "cuma $n/12 — papan harus posisi awal")
                 logLine("learn bidak $n/12")
             } catch (e: Throwable) {
@@ -457,9 +459,10 @@ class OverlayPanelService : android.app.Service() {
             onDone = { rect ->
                 calibrator.clear()
                 calibrator.calibrate(rect)
+                locateTries = 0
                 removeCalibration()
-                setStatus("papan terkalibrasi ${rect.width()}x${rect.height()}")
-                logLine("kalibrasi ok")
+                setStatus("papan dikalibrasi manual")
+                logLine("kalibrasi manual ok")
             },
             onCancel = { removeCalibration() })
         wm.addView(v, WindowManager.LayoutParams(
@@ -525,18 +528,39 @@ class OverlayPanelService : android.app.Service() {
         val cap = capture ?: return
         val bmp = cap.grab() ?: return
 
-        val rect = calibrator.rect ?: BoardReader.findBoard(bmp)
-        if (rect == null) { setStatus("papan tidak ketemu — tap Kalibrasi papan"); return }
-        calibrator.calibrate(rect)
+        var rect = calibrator.rect
+        if (rect == null) {
+            if (locateTries >= 25) { setStatus("papan tidak ketemu — tap Kalibrasi manual"); return }
+            locateTries++
+            val hit = BoardLocator.locate(bmp)
+            if (hit == null) { setStatus("mencari papan… ($locateTries)"); return }
+            calibrator.calibrate(hit.rect)
+            rect = hit.rect
+            logLine("auto-papan ${(hit.score * 100).toInt()}%")
+        }
+        val board = rect!!
 
-        val fen = try { BoardReader.readFenFrom(bmp, rect) } catch (e: Exception) { null } ?: return
+        val fen = try { BoardReader.readFenFrom(bmp, board) } catch (e: Exception) { null } ?: return
+
+        // AUTO-LEARN: begitu papan terlihat di posisi awal, bidak dipelajari sendiri
+        if (!PieceTemplates.isLearned() && PieceTemplates.looksLikeOpening(BoardReader.lastGrid)) {
+            val n = PieceTemplates.learn(BoardPixels(bmp, board), BoardReader.flipped)
+            if (n >= 10) {
+                logLine("auto-learn bidak $n/12")
+                setStatus("bidak dipelajari otomatis ($n/12)")
+                lastFen = null
+                return
+            }
+        }
+
         if (fen == lastFen) return
 
         val prev = lastFen
         val prevBest = lastBest
         val prevCp = lastCp
         lastFen = fen
-        val conf = if (PieceTemplates.isLearned()) " · baca ${(PieceTemplates.lastConfidence * 100).toInt()}%" else " · belum belajar bidak"
+        val conf = if (PieceTemplates.isLearned()) " · baca ${(PieceTemplates.lastConfidence * 100).toInt()}%"
+        else " · tunggu posisi awal utk belajar bidak"
         setStatus("papan ok$conf")
 
         // klasifikasi langkah yang baru saja dimainkan

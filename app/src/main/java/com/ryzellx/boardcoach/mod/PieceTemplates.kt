@@ -1,62 +1,51 @@
 package com.ryzellx.boardcoach.mod
 
-import android.graphics.Bitmap
 import android.graphics.Rect
 
 /**
- * Pengenal bidak berbasis TEMPLATE MATCHING.
+ * Pengenal bidak TEMPLATE MATCHING — versi AUTO.
  *
- * Cara kerja:
- *  1. "Belajar bidak" → user set papan ke posisi awal, kita crop 32 petak yang
- *     sudah diketahui isinya (RNBQKBNR / 8 pion hitam / 8 pion putih) → simpan
- *     mask 16x16 tiap jenis sebagai template.
- *  2. Saat baca papan: tiap petak di-crop, di-mask (piksel yang beda dari warna
- *     latar petak), lalu dicocokkan ke template terdekat (SSD) + dicocokkan warna.
+ * Tidak ada langkah manual: begitu papan terlihat dalam posisi awal standar,
+ * template 12 bidak diambil otomatis dari layar user (jadi cocok untuk tema
+ * bidak apa pun). Kalau belum belajar → heuristik bentuk sebagai cadangan.
  *
- * Jauh lebih akurat daripada heuristik fill-ratio (yang cuma nebak dari "seberapa
- * penuh" petak). Tanpa aset eksternal — template diambil dari layar user sendiri,
- * jadi otomatis cocok dengan tema bidak apa pun (neo, classic, dll).
+ * Semua sampling lewat BoardPixels (satu getPixels per frame) supaya cepat.
  */
 object PieceTemplates {
 
-    const val N = 16                 // resolusi mask per sisi
-    private const val THRESH = 110   // ambang jarak warna latar→bidak
+    const val N = 16
+    private const val THRESH = 110
     private const val MIN_FILL = 0.06f
 
-    private val templates = HashMap<String, FloatArray>()   // "wp","wn",... -> mask rata-rata
-    private val samples = HashMap<String, Int>()
+    private val templates = HashMap<String, FloatArray>()
 
-    /** Akurasi baca terakhir (0..1) — untuk indikator di panel. */
     @Volatile var lastConfidence: Float = 0f
 
     fun isLearned(): Boolean = templates.size >= 10
-
-    fun clear() { templates.clear(); samples.clear(); lastConfidence = 0f }
-
     fun learnedCount(): Int = templates.size
+    fun clear() { templates.clear(); lastConfidence = 0f }
 
     data class Sq(val mask: FloatArray, val fill: Float, val luma: Int)
 
-    /* ---------------- geometri ---------------- */
+    /* ---------- geometri (koordinat DISPLAY: dRow 0 = atas layar) ---------- */
 
-    fun squareRect(board: Rect, file: Int, rank: Int, flip: Boolean): Rect {
-        val side = board.width().toDouble() / 8
-        val f = if (flip) 7 - file else file
-        val r = if (flip) rank else 7 - rank          // rank 0 (rank1) di bawah kalau tidak flip
-        val l = (board.left + f * side).toInt()
-        val t = (board.top + r * side).toInt()
-        return Rect(l, t, (board.left + (f + 1) * side).toInt(), (board.top + (r + 1) * side).toInt())
+    fun squareOf(bp: BoardPixels, dFile: Int, dRow: Int): Rect {
+        val side = bp.w.toDouble() / 8
+        val l = (dFile * side).toInt()
+        val t = (dRow * side).toInt()
+        return Rect(l, t, (l + side).toInt(), (t + side).toInt())
     }
 
-    /* ---------------- ekstraksi mask ---------------- */
+    /* ---------- ekstraksi mask satu petak ---------- */
 
-    fun extract(bmp: Bitmap, sq: Rect): Sq {
+    fun extract(bp: BoardPixels, dFile: Int, dRow: Int): Sq {
+        val sq = squareOf(bp, dFile, dRow)
         val inset = (sq.width() * 0.16).toInt().coerceAtLeast(1)
         val cs = intArrayOf(
-            bmp.getPixel((sq.left + inset).coerceIn(0, bmp.width - 1), (sq.top + inset).coerceIn(0, bmp.height - 1)),
-            bmp.getPixel((sq.right - inset).coerceIn(0, bmp.width - 1), (sq.top + inset).coerceIn(0, bmp.height - 1)),
-            bmp.getPixel((sq.left + inset).coerceIn(0, bmp.width - 1), (sq.bottom - inset).coerceIn(0, bmp.height - 1)),
-            bmp.getPixel((sq.right - inset).coerceIn(0, bmp.width - 1), (sq.bottom - inset).coerceIn(0, bmp.height - 1)),
+            bp.at(sq.left + inset, sq.top + inset),
+            bp.at(sq.right - inset, sq.top + inset),
+            bp.at(sq.left + inset, sq.bottom - inset),
+            bp.at(sq.right - inset, sq.bottom - inset),
         )
         val rs = cs.map { it shr 16 and 0xFF }.sorted()
         val gs = cs.map { it shr 8 and 0xFF }.sorted()
@@ -71,9 +60,10 @@ object PieceTemplates {
 
         for (gy in 0 until N) {
             for (gx in 0 until N) {
-                val x = (sq.left + (gx + 0.5) * stepX).toInt().coerceIn(0, bmp.width - 1)
-                val y = (sq.top + (gy + 0.5) * stepY).toInt().coerceIn(0, bmp.height - 1)
-                val c = bmp.getPixel(x, y)
+                val c = bp.at(
+                    sq.left + ((gx + 0.5) * stepX).toInt(),
+                    sq.top + ((gy + 0.5) * stepY).toInt(),
+                )
                 val r = c shr 16 and 0xFF
                 val g = c shr 8 and 0xFF
                 val b = c and 0xFF
@@ -85,65 +75,17 @@ object PieceTemplates {
                 }
             }
         }
-        val fill = cnt.toFloat() / (N * N)
-        val luma = if (cnt > 0) (lumaSum / cnt).toInt() else 0
-        return Sq(mask, fill, luma)
+        return Sq(mask, cnt.toFloat() / (N * N), if (cnt > 0) (lumaSum / cnt).toInt() else 0)
     }
 
-    /* ---------------- belajar ---------------- */
+    /* ---------- klasifikasi (koordinat display) ---------- */
 
-    /** Posisi awal standar: map (file, rank) -> piece FEN char. */
-    private fun startPosition(): List<Triple<Int, Int, Char>> {
-        val out = ArrayList<Triple<Int, Int, Char>>()
-        val back = "RNBQKBNR"
-        for (f in 0 until 8) {
-            out.add(Triple(f, 0, back[f]))      // putih baris 1
-            out.add(Triple(f, 1, 'P'))          // pion putih
-            out.add(Triple(f, 6, 'p'))          // pion hitam
-            out.add(Triple(f, 7, back[f].lowercaseChar())) // hitam baris 8
-        }
-        return out
-    }
-
-    /** Belajar dari frame yang sekarang. Return jumlah template yang berhasil. */
-    fun learn(bmp: Bitmap, board: Rect): Int {
-        val acc = HashMap<String, FloatArray>()
-        val n = HashMap<String, Int>()
-
-        for ((f, r, pc) in startPosition()) {
-            val sq = squareRect(board, f, r, false)
-            val ex = extract(bmp, sq)
-            if (ex.fill < MIN_FILL) continue
-            val key = keyOf(pc)
-            val cur = acc.getOrPut(key) { FloatArray(N * N) }
-            for (i in ex.mask.indices) cur[i] += ex.mask[i]
-            n[key] = (n[key] ?: 0) + 1
-        }
-
-        templates.clear(); samples.clear()
-        for ((k, sum) in acc) {
-            val c = n[k] ?: 0
-            if (c < 2) continue
-            for (i in sum.indices) sum[i] /= c
-            templates[k] = sum
-            samples[k] = c
-        }
-        return templates.size
-    }
-
-    private fun keyOf(pc: Char): String =
-        (if (pc.isUpperCase()) "w" else "b") + pc.lowercaseChar()
-
-    /* ---------------- klasifikasi ---------------- */
-
-    /** Return FEN char ('P','n',...) atau null kalau petak kosong. */
-    fun classifyChar(bmp: Bitmap, board: Rect, file: Int, rank: Int, flip: Boolean): Char? {
-        val ex = extract(bmp, squareRect(board, file, rank, flip))
+    fun classifyDisplay(bp: BoardPixels, dFile: Int, dRow: Int): Char? {
+        val ex = extract(bp, dFile, dRow)
         if (ex.fill < MIN_FILL) return null
         val color = if (ex.luma > 150) 'w' else 'b'
 
         if (!isLearned()) {
-            // fallback heuristik (kalau belum belajar)
             val t = when {
                 ex.fill > 0.72 -> 'k'; ex.fill > 0.6 -> 'q'; ex.fill > 0.48 -> 'r'
                 ex.fill > 0.38 -> 'b'; ex.fill > 0.28 -> 'n'; else -> 'p'
@@ -167,5 +109,77 @@ object PieceTemplates {
         lastConfidence = (1f - bestDist / (N * N)).coerceIn(0f, 1f)
         val type = bestKey[1]
         return if (color == 'w') type.uppercaseChar() else type
+    }
+
+    /* ---------- belajar otomatis ---------- */
+
+    private fun startCells(): List<Triple<Int, Int, Char>> {
+        val back = "RNBQKBNR"
+        val out = ArrayList<Triple<Int, Int, Char>>()
+        for (f in 0 until 8) {
+            out.add(Triple(f, 0, back[f]))
+            out.add(Triple(f, 1, 'P'))
+            out.add(Triple(f, 6, 'p'))
+            out.add(Triple(f, 7, back[f].lowercaseChar()))
+        }
+        return out
+    }
+
+    /** Belajar dari buffer frame sekarang. Return jumlah template (maks 12). */
+    fun learn(bp: BoardPixels, flip: Boolean): Int {
+        val acc = HashMap<String, FloatArray>()
+        val n = HashMap<String, Int>()
+
+        for ((f, r, pc) in startCells()) {
+            val df = if (flip) 7 - f else f
+            val dr = if (flip) r else 7 - r
+            val ex = extract(bp, df, dr)
+            if (ex.fill < MIN_FILL) continue
+            val key = (if (pc.isUpperCase()) "w" else "b") + pc.lowercaseChar()
+            val cur = acc.getOrPut(key) { FloatArray(N * N) }
+            for (i in ex.mask.indices) cur[i] += ex.mask[i]
+            n[key] = (n[key] ?: 0) + 1
+        }
+
+        templates.clear()
+        for ((k, sum) in acc) {
+            val c = n[k] ?: 0
+            if (c < 2) continue
+            for (i in sum.indices) sum[i] /= c
+            templates[k] = sum
+        }
+        return templates.size
+    }
+
+    private val START_FENS = setOf(
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR",
+        "RNBQKBNR/PPPPPPPP/8/8/8/8/pppppppp/rnbqkbnr",
+    )
+
+    fun looksLikeStart(boardPart: String): Boolean = START_FENS.contains(boardPart)
+
+    /**
+     * Deteksi posisi awal secara STRUKTURAL (tidak bergantung jenis bidak yang
+     * mungkin salah diklasifikasi): 32 bidak, hanya di 4 baris pinggir, tiap
+     * baris pinggir penuh 8. Ini pemicu auto-learn.
+     */
+    fun looksLikeOpening(disp: Array<Array<Char?>>?): Boolean {
+        if (disp == null) return false
+        var count = 0
+        for (dr in 0 until 8) {
+            for (df in 0 until 8) {
+                if (disp[dr][df] != null) {
+                    if (dr in 2..5) return false
+                    count++
+                }
+            }
+        }
+        if (count != 32) return false
+        for (dr in intArrayOf(0, 1, 6, 7)) {
+            var n = 0
+            for (df in 0 until 8) if (disp[dr][df] != null) n++
+            if (n != 8) return false
+        }
+        return true
     }
 }
