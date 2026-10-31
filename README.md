@@ -26,6 +26,30 @@ menggambar panah saran, dan (opsional) memainkan langkah otomatis.
 2. **Aksesibilitas** — tap otomatis untuk auto-move (+ deteksi window)
 3. **MediaProjection** — baca papan (diminta sekali tiap sesi)
 
+## Troubleshooting
+
+### "Aplikasi tidak diberi akses" / "Dikontrol oleh Setelan Terbatas" (Android 13+)
+
+App yang di-install dari luar Play Store (sideload) **diblokir** dari izin
+Aksesibilitas — ini proteksi OS, bukan bug. Buka blokirnya:
+
+1. **Setelan → Aplikasi → Board Coach Mod**
+2. Tap **⋮** (titik tiga, kanan atas)
+3. Pilih **"Izinkan setelan terbatas"** (Allow restricted settings)
+4. Balik ke **Setelan → Aksesibilitas** → aktifkan **Board Coach - baca papan**
+
+Alternatif cepat: di dalam app tap **"2. Aktifkan Aksesibilitas"** → tombol
+**Info app** → lakukan langkah 2–4 di atas.
+
+### Panel tidak muncul / tidak ada panah
+- Pastikan izin **overlay** sudah aktif (Setelan → Aplikasi → Board Coach → Gambar di atas app lain).
+- Restart mod menu (tombol **Stop mod**, lalu **3. Aktifkan mod menu**).
+
+### Papan tidak terbaca
+- Papan harus **terlihat penuh** di layar (jangan ketutup dialog/keyboard).
+- Mode gelap chess.com lebih stabil daripada mode terang.
+
+
 ## Build
 
 - `./gradlew :app:assembleDebug` (bootstrap download Gradle 8.7 kalau perlu)

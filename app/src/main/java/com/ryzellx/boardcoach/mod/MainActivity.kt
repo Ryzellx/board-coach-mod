@@ -53,11 +53,29 @@ class MainActivity : Activity() {
             } else Toast.makeText(this, "overlay sudah diizinkan", Toast.LENGTH_SHORT).show()
         }
         btn("2. Aktifkan Aksesibilitas") {
-            try {
-                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-            } catch (e: Exception) {
-                Toast.makeText(this, "buka Settings → Aksesibilitas → Board Coach", Toast.LENGTH_LONG).show()
-            }
+            // Android 13+ memblokir izin Aksesibilitas untuk app sideload:
+            // harus buka App Info → ⋮ → "Izinkan setelan terbatas" dulu.
+            android.app.AlertDialog.Builder(this)
+                .setTitle("Android 13+ — setelan terbatas")
+                .setMessage(
+                    "Kalau muncul \"Aplikasi tidak diberi akses\" / " +
+                    "\"Dikontrol oleh Setelan Terbatas\", lakukan ini:\n\n" +
+                    "1. Tap tombol di bawah → halaman info app\n" +
+                    "2. Tap ⋮ (titik tiga, kanan atas)\n" +
+                    "3. Pilih \"Izinkan setelan terbatas\"\n" +
+                    "4. Baru balik ke Aksesibilitas → aktifkan Board Coach\n\n" +
+                    "Ini proteksi OS untuk app dari luar Play Store, bukan bug."
+                )
+                .setPositiveButton("Info app") { _, _ ->
+                    startActivity(Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:$packageName")))
+                }
+                .setNeutralButton("Aksesibilitas") { _, _ ->
+                    runCatching { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                }
+                .setNegativeButton("Tutup", null)
+                .show()
         }
         btn("3. Aktifkan mod menu") {
             val intent = Intent(this, OverlayPanelService::class.java)
