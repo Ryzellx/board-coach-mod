@@ -42,6 +42,7 @@ class EngineClient(private val context: Context) {
     @Volatile private var alive = false
     @Volatile private var engineReady = false
     @Volatile var msgCount = 0
+    @Volatile private var sample = ""
     @Volatile private var firstError: String? = null
 
     @Volatile private var lastCp: Double? = null
@@ -66,7 +67,7 @@ class EngineClient(private val context: Context) {
             send("uci")
             if (watchdogTries > 7) {
                 if (firstError == null) {
-                    firstError = "diam (uci=${watchdogTries}x attach=$attached html=$pageLoaded worker=$workerMade msg=$msgCount)"
+                    firstError = "diam (uci=${watchdogTries}x attach=$attached html=$pageLoaded worker=$workerMade msg=$msgCount samp=$sample)"
                 }
                 return
             }
@@ -82,7 +83,7 @@ class EngineClient(private val context: Context) {
         wv.settings.allowFileAccess = false
         wv.settings.domStorageEnabled = true
         wv.addJavascriptInterface(object {
-            @JavascriptInterface fun onUci(line: String) { handleLine(line) }
+            @JavascriptInterface fun onUci(line: String) { handleChunk(line) }
         }, "BCAndroid")
 
         val loader = WebViewAssetLoader.Builder()
@@ -157,15 +158,30 @@ class EngineClient(private val context: Context) {
         return sb.append("\"").toString()
     }
 
+    /**
+     * Stockfish bisa mengirim BEBERAPA baris dalam satu postMessage (chunk,
+     * kadang dengan '\n' di depan). Dulu kita cek prefix langsung ke chunk →
+     * "uciok" tidak pernah cocok walau mesinnya jalan (worker=true msg=42).
+     * Sekarang pecah per baris dulu, baru dicocokkan.
+     */
+    private fun handleChunk(data: String) {
+        for (raw in data.split('\n')) {
+            val line = raw.trim()
+            if (line.isEmpty()) continue
+            msgCount++
+            if (sample.length < 70) sample = (sample + "|" + line.take(32))
+            handleLine(line)
+        }
+    }
+
     private fun handleLine(line: String) {
-        msgCount++
         when {
             line.startsWith("ERR:") -> { if (firstError == null) firstError = line.take(140) }
             line.startsWith("LOG: worker") -> workerMade = true
             line.startsWith("id ") -> alive = true
-            line.startsWith("uciok") -> { alive = true; send("isready") }
-            line.startsWith("readyok") -> { engineReady = true; main.removeCallbacks(watchdog) }
-            line.startsWith("info") -> parseInfo(line)
+            line.contains("uciok") -> { alive = true; send("isready") }
+            line.contains("readyok") -> { engineReady = true; main.removeCallbacks(watchdog) }
+            line.startsWith("info") || line.contains(" score ") -> parseInfo(line)
             line.startsWith("bestmove") -> {
                 best = line.split(" ").getOrNull(1)
                 latch?.countDown()
