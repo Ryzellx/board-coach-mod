@@ -545,7 +545,7 @@ class OverlayPanelService : android.app.Service() {
 
     private fun ensureEngine() {
         if (engine == null) {
-            val e = EngineClient(applicationContext)
+            val e = EngineClient(this)
             engine = e
             e.start() // main thread
             setStatus("engine memuat…")
@@ -678,9 +678,12 @@ class OverlayPanelService : android.app.Service() {
     private fun requestMove(fen: String) {
         val eng = engine ?: return
         if (!eng.isReady) {
-            setStatus(if (eng.lastError != null) "engine gagal — ${eng.lastError}"
-            else if (eng.isLoaded) "engine memuat… (stockfish init)"
-            else "engine memuat… (webview)")
+            setStatus(when {
+                eng.lastError != null -> "engine gagal — ${eng.lastError}"
+                eng.isAlive -> "engine memuat… (menunggu readyok)"
+                eng.isLoaded -> "engine memuat… (stockfish init)"
+                else -> "engine memuat… (webview)"
+            })
             return
         }
         val prof = EloProfile.forElo(elo)
