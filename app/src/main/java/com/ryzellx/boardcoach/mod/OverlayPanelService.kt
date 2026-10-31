@@ -677,9 +677,18 @@ class OverlayPanelService : android.app.Service() {
 
     private fun requestMove(fen: String) {
         val eng = engine ?: return
-        if (!eng.isReady) { setStatus("engine memuat…"); return }
+        if (!eng.isReady) {
+            setStatus(if (eng.lastError != null) "engine gagal — ${eng.lastError}"
+            else if (eng.isLoaded) "engine memuat… (stockfish init)"
+            else "engine memuat… (webview)")
+            return
+        }
         val prof = EloProfile.forElo(elo)
-        val res = eng.analyzeWithSkill(fen, prof.skill, prof.movetime, prof.depth, 8000) ?: return
+        val res = eng.analyzeWithSkill(fen, prof.skill, prof.movetime, prof.depth, 8000) ?: run {
+            setStatus("engine tidak balas — ${eng.lastError ?: "timeout"}")
+            logLine("engine timeout")
+            return
+        }
         lastBest = res.best
         lastCp = res.cp
         val cpTxt = res.cp?.let { " (${it.toInt()})" } ?: ""

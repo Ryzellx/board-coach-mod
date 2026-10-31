@@ -9,13 +9,16 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Klien UCI untuk Stockfish asm.js (assets/stockfish.js) di WebView tersembunyi
- * via Blob Worker. Tanpa binary native / NDK.
+ * Klien UCI untuk Stockfish asm.js (assets/stockfish.js) di WebView tersembunyi.
  *
- * FIX GUI FREEZE:
- *  - WebView dibuat di MAIN thread.
- *  - analyze() dipanggil dari WORKER thread; menunggu latch di thread pemanggil
- *    sehingga main thread tetap bebas (UI tidak beku).
+ * v1.5.1 — kenapa engine dulu DIAM:
+ *  - Halaman dimuat dengan base URL file://android_asset → origin dokumen jadi
+ *    "null"/file → `new Worker(blobURL)` DIBLOK browser (SecurityError),
+ *    jadi Stockfish tidak pernah hidup, tidak pernah balas bestmove.
+ *  - Sekarang base URL https://boardcoach.local/ → origin https yang sah →
+ *    Blob Worker diizinkan.
+ *  - Semua error JS dikirim balik lewat BCAndroid.onUci("ERR: ...") supaya
+ *    kelihatan di panel, bukan diam-diam.
  */
 class EngineClient(private val context: Context) {
 
@@ -23,31 +26,43 @@ class EngineClient(private val context: Context) {
 
     private var webView: WebView? = null
 
-    @Volatile private var ready = false
+    @Volatile private var pageLoaded = false
+    @Volatile private var uciOk = false
+    @Volatile private var engineReady = false
+    @Volatile var lastError: String? = null
+
     @Volatile private var lastCp: Double? = null
     @Volatile private var lastPv: String? = null
     @Volatile private var best: String? = null
     private var latch: CountDownLatch? = null
 
-    val isReady: Boolean get() = ready
+    /** true kalau engine sudah menjawab readyok. */
+    val isReady: Boolean get() = engineReady
+
+    /** true kalau halaman sudah dimuat (belum tentu engine siap). */
+    val isLoaded: Boolean get() = pageLoaded
 
     /** WAJIB dipanggil di main thread. */
     @SuppressLint("SetJavaScriptEnabled")
     fun start() {
         val sfJs = try {
             context.assets.open("stockfish.js").readBytes().toString(Charsets.UTF_8)
-        } catch (e: Exception) { null } ?: return
+        } catch (e: Exception) {
+            lastError = "assets: ${e.javaClass.simpleName}"
+            return
+        }
 
         val wv = WebView(context)
         wv.settings.javaScriptEnabled = true
         wv.settings.allowFileAccess = true
+        wv.settings.domStorageEnabled = true
         wv.addJavascriptInterface(object {
             @JavascriptInterface fun onUci(line: String) { handleLine(line) }
         }, "BCAndroid")
 
         wv.webViewClient = object : WebViewClient() {
             override fun onPageFinished(view: WebView?, url: String?) {
-                ready = true
+                pageLoaded = true
                 send("uci")
                 send("setoption name Threads value 1")
                 send("setoption name Hash value 16")
@@ -56,13 +71,18 @@ class EngineClient(private val context: Context) {
 
         val escaped = sfJs.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
         val html = "<html><body><script>" +
+            "window.onerror=function(m,s,l,c,e){try{BCAndroid.onUci('ERR: '+m+' @'+l)}catch(x){}};" +
+            "try{" +
             "var S=\"$escaped\";" +
             "var b=new Blob([S],{type:'application/javascript'});" +
             "var w=new Worker(URL.createObjectURL(b));" +
-            "w.onmessage=function(e){BCAndroid.onUci(e.data)};" +
-            "window.send=function(c){w.postMessage(c)};" +
+            "w.onmessage=function(e){try{BCAndroid.onUci(String(e.data))}catch(x){}};" +
+            "w.onerror=function(e){try{BCAndroid.onUci('ERR: worker '+(e.message||e))}catch(x){}};" +
+            "window.send=function(c){try{w.postMessage(c)}catch(x){BCAndroid.onUci('ERR: post '+x)}};" +
+            "}catch(e){BCAndroid.onUci('ERR: init '+e);}" +
             "</script></body></html>"
-        wv.loadDataWithBaseURL("file:///android_asset/", html, "text/html", "utf-8", null)
+        // PENTING: base URL https (bukan file://) → Blob Worker diizinkan.
+        wv.loadDataWithBaseURL("https://boardcoach.local/", html, "text/html", "utf-8", null)
         webView = wv
     }
 
@@ -87,8 +107,10 @@ class EngineClient(private val context: Context) {
     }
 
     private fun handleLine(line: String) {
+        if (line.startsWith("ERR:")) { lastError = line.take(120); return }
         when {
-            line.startsWith("uciok") -> send("isready")
+            line.startsWith("uciok") -> { uciOk = true; send("isready") }
+            line.startsWith("readyok") -> engineReady = true
             line.startsWith("info") -> parseInfo(line)
             line.startsWith("bestmove") -> {
                 best = line.split(" ").getOrNull(1)
@@ -116,9 +138,9 @@ class EngineClient(private val context: Context) {
 
     fun setSkill(skill: Int) { send("setoption name Skill Level value $skill") }
 
-    /** Blocking di thread pemanggil — pakai dari WORKER thread. cp = sudut pandang side-to-move. */
+    /** Blocking di thread pemanggil — pakai dari WORKER thread. */
     fun analyze(fen: String, movetime: Int, depth: Int, timeoutMs: Long = 8000): Result? {
-        if (!ready) return null
+        if (!engineReady) return null
         best = null; lastCp = null; lastPv = null
         val l = CountDownLatch(1)
         latch = l
@@ -126,7 +148,7 @@ class EngineClient(private val context: Context) {
         send("go movetime $movetime depth $depth")
         l.await(timeoutMs, TimeUnit.MILLISECONDS)
         latch = null
-        val b = best ?: return null
+        val b = best ?: run { lastError = "timeout movetime=$movetime"; return null }
         return Result(b, lastCp, lastPv)
     }
 
@@ -138,7 +160,8 @@ class EngineClient(private val context: Context) {
     fun close() {
         val wv = webView
         webView = null
-        ready = false
+        pageLoaded = false
+        engineReady = false
         if (wv != null) wv.post { runCatching { wv.destroy() } }
     }
 }
