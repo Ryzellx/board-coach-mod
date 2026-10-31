@@ -316,6 +316,28 @@ class OverlayPanelService : android.app.Service() {
         }
         body.addView(btnRow)
 
+        val btnRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val learnBtn = TextView(this).apply {
+            text = "Belajar bidak"; textSize = 12f
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setBackgroundResource(com.ryzellx.boardcoach.mod.R.drawable.bg_button)
+            setTextColor(0xFFE2E8F0.toInt())
+            setOnClickListener { learnPieces() }
+        }
+        val flipChip = chip("Papan diputar", BoardReader.flipped).apply {
+            setOnClickListener {
+                BoardReader.flipped = !BoardReader.flipped
+                updateChip(this, BoardReader.flipped)
+                setStatus(if (BoardReader.flipped) "papan diputar (main hitam)" else "papan normal")
+            }
+        }
+        listOf(learnBtn, flipChip).forEach {
+            it.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    .apply { marginEnd = dp(4) }
+            btnRow2.addView(it)
+        }
+        body.addView(btnRow2)
+
         statsTv = TextView(this).apply {
             textSize = 11f; setTextColor(0xFFCBD5E1.toInt())
             visibility = View.GONE
@@ -391,6 +413,24 @@ class OverlayPanelService : android.app.Service() {
     private fun stopMod() {
         Toast.makeText(this, "Board Coach dihentikan", Toast.LENGTH_SHORT).show()
         stopSelf()
+    }
+
+    private fun learnPieces() {
+        val cap = capture ?: run { setStatus("butuh izin capture dulu"); return }
+        val rect = calibrator.rect ?: run { setStatus("kalibrasi papan dulu"); return }
+        setStatus("belajar bidak…")
+        work.post {
+            try {
+                val bmp = cap.grab()
+                if (bmp == null) { setStatus("gagal ambil frame"); return@post }
+                val n = PieceTemplates.learn(bmp, rect)
+                setStatus(if (n >= 10) "bidak dipelajari: $n/12 — siap" else "cuma $n/12 — papan harus posisi awal")
+                logLine("learn bidak $n/12")
+            } catch (e: Throwable) {
+                CrashLogger.log(this@OverlayPanelService, "learnPieces", e)
+                setStatus("belajar gagal: ${e.javaClass.simpleName}")
+            }
+        }
     }
 
     private fun ensureArrowOverlay() {
@@ -496,7 +536,8 @@ class OverlayPanelService : android.app.Service() {
         val prevBest = lastBest
         val prevCp = lastCp
         lastFen = fen
-        setStatus("papan ok")
+        val conf = if (PieceTemplates.isLearned()) " · baca ${(PieceTemplates.lastConfidence * 100).toInt()}%" else " · belum belajar bidak"
+        setStatus("papan ok$conf")
 
         // klasifikasi langkah yang baru saja dimainkan
         val eng = engine

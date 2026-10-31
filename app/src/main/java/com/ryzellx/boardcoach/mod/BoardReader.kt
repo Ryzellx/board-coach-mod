@@ -12,6 +12,9 @@ object BoardReader {
     const val SIZE = 8
     private val FILES = "abcdefgh"
 
+    /** Papan diputar (main sebagai hitam). */
+    @Volatile var flipped = false
+
     data class Piece(val color: Char, val type: Char) // color: 'w'/'b', type: 'p'..'k'
     data class Square(val file: Int, val rank: Int) { // 0-7, rank 1=baris bawah
         val name: String get() = FILES[file].toString() + (rank + 1)
@@ -87,41 +90,50 @@ object BoardReader {
 
     /** Baca FEN dengan rect papan eksplisit (hasil kalibrasi manual). */
     fun readFenFrom(bitmap: Bitmap, board: android.graphics.Rect): String {
+        val useTmpl = PieceTemplates.isLearned()
         val side = board.width().toDouble() / SIZE
+        // grid[displayRow][displayFile] — displayRow 0 = atas layar
+        val grid = Array(SIZE) { arrayOfNulls<Char>(SIZE) }
 
-        val pieces = ArrayList<Pair<Square, Piece>>()
-        for (r in 0 until SIZE) {
-            for (f in 0 until SIZE) {
-                val cx = board.left + (f + 0.5) * side
-                val cy = board.top + (r + 0.5) * side
-                val piece = classifySquare(bitmap, cx.toInt(), cy.toInt(), side.toInt())
-                if (piece != null) {
-                    val rank = SIZE - r // r=0 baris atas = rank 8
-                    pieces.add(Pair(Square(f, rank - 1), piece))
+        for (dr in 0 until SIZE) {
+            for (df in 0 until SIZE) {
+                val af = if (flipped) 7 - df else df
+                val ar = if (flipped) dr else 7 - dr
+                val pc: Char? = if (useTmpl) {
+                    PieceTemplates.classifyChar(bitmap, board, af, ar, flipped)
+                } else {
+                    val cx = board.left + (df + 0.5) * side
+                    val cy = board.top + (dr + 0.5) * side
+                    classifySquare(bitmap, cx.toInt(), cy.toInt(), side.toInt())?.toFenChar()
                 }
+                grid[dr][df] = pc
             }
         }
 
-        // susun FEN
+        // susun FEN: selalu mulai dari rank 8
         val sb = StringBuilder()
-        for (r in 0 until SIZE) {
+        for (arRow in 0 until SIZE) {
             var empty = 0
-            for (f in 0 until SIZE) {
-                val rank = SIZE - r
-                val sq = Square(f, rank - 1)
-                val found = pieces.firstOrNull { it.first == sq }
-                if (found == null) { empty++ } else {
+            for (af in 0 until SIZE) {
+                val df = if (flipped) 7 - af else af
+                val dr = if (flipped) 7 - arRow else arRow
+                val pc = grid[dr][df]
+                if (pc == null) {
+                    empty++
+                } else {
                     if (empty > 0) { sb.append(empty); empty = 0 }
-                    val p = found.second
-                    sb.append(if (p.color == 'w') p.type.uppercaseChar() else p.type)
+                    sb.append(pc)
                 }
             }
             if (empty > 0) sb.append(empty)
-            if (r < SIZE - 1) sb.append('/')
+            if (arRow < SIZE - 1) sb.append('/')
         }
         sb.append(" w - - 0 1")
         return sb.toString()
     }
+
+    private fun Piece.toFenChar(): Char =
+        if (color == 'w') type.uppercaseChar() else type
 
     /** Klasifikasi satu petak: warna dominan & jenis bidak. */
     private fun classifySquare(bitmap: Bitmap, cx: Int, cy: Int, side: Int): Piece? {
