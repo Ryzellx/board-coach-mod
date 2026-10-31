@@ -81,7 +81,9 @@ class MainActivity : Activity() {
         btn("3. Aktifkan mod menu") {
             val intent = Intent(this, OverlayPanelService::class.java)
             startForegroundService(intent)
-            Toast.makeText(this, "panel aktif — beri izin capture kalau diminta", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "panel aktif — beri izin capture", Toast.LENGTH_SHORT).show()
+            // langsung minta izin capture, biar user nggak perlu tap tombol lain
+            root.postDelayed({ requestProjection() }, 600)
         }
         btn("4. Beri izin Capture Layar") {
             requestProjection()

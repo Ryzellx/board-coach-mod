@@ -65,6 +65,7 @@ class OverlayPanelService : android.app.Service() {
     @Volatile private var arrowsOn = true
     @Volatile private var elo = 1400
     @Volatile private var scanToken = 0
+    @Volatile private var captureError: String? = null
 
     private var moveDelay = 600L
     private var lastFen: String? = null
@@ -102,7 +103,10 @@ class OverlayPanelService : android.app.Service() {
             }
             scanRunning = true
             startScan()
-            if (capture == null) setStatus("butuh izin capture — tap tombol 4 di app")
+            if (capture == null) {
+                captureError?.let { setStatus("capture gagal — $it") }
+                    ?: setStatus("butuh izin capture — buka app, tap tombol 3")
+            }
         } catch (e: Throwable) {
             CrashLogger.log(this, "onStartCommand", e)
             setStatus("gagal start: ${e.javaClass.simpleName}")
@@ -110,7 +114,7 @@ class OverlayPanelService : android.app.Service() {
         return START_STICKY
     }
 
-    private fun startAsForeground() {
+    private fun startAsForeground(type: Int = android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) {
         val nm = getSystemService(android.app.NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) {
             nm.createNotificationChannel(
@@ -127,9 +131,7 @@ class OverlayPanelService : android.app.Service() {
                 .setContentTitle("Board Coach").setContentText("Mod menu aktif").build()
 
         if (Build.VERSION.SDK_INT >= 34) {
-            androidx.core.app.ServiceCompat.startForeground(
-                this, 1, notif,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            androidx.core.app.ServiceCompat.startForeground(this, 1, notif, type)
         } else {
             startForeground(1, notif)
         }
@@ -139,13 +141,24 @@ class OverlayPanelService : android.app.Service() {
         try {
             val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             val projection = mpm.getMediaProjection(resultCode, data)
+            // API 34: foreground service HARUS punya type mediaProjection
+            // SEBELUM createVirtualDisplay, kalau tidak → SecurityException.
+            if (Build.VERSION.SDK_INT >= 29) {
+                runCatching {
+                    startAsForeground(
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or
+                        android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                }
+            }
             capture?.stop()
             capture = ScreenCapture(this, projection).also { it.start() }
+            captureError = null
             setStatus("capture aktif — baca papan")
         } catch (e: Throwable) {
             CrashLogger.log(this, "attachProjection", e)
             capture = null
-            setStatus("capture gagal: ${e.javaClass.simpleName}")
+            captureError = "${e.javaClass.simpleName}: ${e.message?.take(60) ?: ""}"
+            setStatus("capture gagal — $captureError")
         }
     }
 
