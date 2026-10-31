@@ -1,61 +1,82 @@
 package com.ryzellx.boardcoach.mod
 
-import android.app.Activity
-import android.app.AlertDialog
 import android.content.Context
 import android.content.Intent
 import android.graphics.PixelFormat
-import android.graphics.Point
 import android.graphics.Rect
 import android.media.projection.MediaProjectionManager
-import android.net.Uri
 import android.os.Build
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
-import android.provider.Settings
 import android.view.Gravity
-import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
-import android.graphics.Bitmap
+import android.widget.Toast
 
-/** Service panel overlay + capture + engine. */
+/**
+ * Service overlay: panel mod menu + panah + capture + engine.
+ *
+ * FIX v1.1:
+ *  - scan + engine jalan di WORKER thread (dulu di main → UI beku sampai 8 detik).
+ *  - GUI baru: header bisa di-drag, tombol minimize (bubble), resize (3 ukuran),
+ *    tombol stop, indikator best move, statistik, tombol kalibrasi papan.
+ */
 class OverlayPanelService : android.app.Service() {
 
     private lateinit var wm: WindowManager
-    private var panel: View? = null
-    private var chevron: FrameLayout? = null
+    private val main = Handler(Looper.getMainLooper())
+    private lateinit var workerThread: HandlerThread
+    private lateinit var work: Handler
+
+    // views
+    private var panelRoot: LinearLayout? = null
+    private var panelParams: WindowManager.LayoutParams? = null
+    private var bubble: FrameLayout? = null
+    private var bubbleParams: WindowManager.LayoutParams? = null
     private var arrowOverlay: FrameLayout? = null
     private var arrowView: ArrowOverlayView? = null
+    private var calibrateOverlay: View? = null
+
+    private var statusTv: TextView? = null
+    private var bestTv: TextView? = null
+    private var statsTv: TextView? = null
+    private var logTv: TextView? = null
+    private var eloTv: TextView? = null
+    private var chipEngine: TextView? = null
+    private var chipAuto: TextView? = null
+    private var chipArrows: TextView? = null
+
+    // state
     private var capture: ScreenCapture? = null
     private var engine: EngineClient? = null
     private var calibrator = BoardCalibrator()
-    private val handler = Handler(Looper.getMainLooper())
-    private var scanRunning = false
-    private var engineOn = false
-    private var autoMove = false
-    private var arrowsOn = true
-    private var elo = 1600
+    private val stats = MoveStats()
+
+    @Volatile private var scanRunning = false
+    @Volatile private var engineOn = false
+    @Volatile private var autoMove = false
+    @Volatile private var arrowsOn = true
+    @Volatile private var elo = 1400
+    @Volatile private var scanToken = 0
+
     private var moveDelay = 600L
     private var lastFen: String? = null
     private var lastBest: String? = null
-    private var statusView: TextView? = null
-    private var logView: TextView? = null
-    private var pollToken = 0
-    private val stats = Classifier.emptyStats()
-    private var lossSum = 0.0
-    private var bestMoveShown = false
+    private var lastCp: Double? = null
+    private var lastAutoMove: String? = null
+    private var statsVisible = false
+    private var widthIdx = 1
 
     companion object {
         var pendingProjection: Pair<Int, Intent>? = null
+        private val WIDTHS_DP = intArrayOf(230, 290, 370)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -63,23 +84,23 @@ class OverlayPanelService : android.app.Service() {
     override fun onCreate() {
         super.onCreate()
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        workerThread = HandlerThread("bc-scan").also { it.start() }
+        work = Handler(workerThread.looper)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == "stop") {
-            stopSelf(); return START_NOT_STICKY
-        }
+        if (intent?.action == "stop") { stopSelf(); return START_NOT_STICKY }
         try {
             startAsForeground()
-            if (panel == null) buildPanel()
             ensureArrowOverlay()
+            if (panelRoot == null) buildPanel()
             pendingProjection?.let { (rc, data) ->
                 pendingProjection = null
                 attachProjection(rc, data)
             }
             scanRunning = true
             startScan()
-            setStatus(if (capture == null) "butuh izin capture — tap tombol 4" else "jalan")
+            if (capture == null) setStatus("butuh izin capture — tap tombol 4 di app")
         } catch (e: Throwable) {
             CrashLogger.log(this, "onStartCommand", e)
             setStatus("gagal start: ${e.javaClass.simpleName}")
@@ -96,36 +117,20 @@ class OverlayPanelService : android.app.Service() {
         val notif = if (Build.VERSION.SDK_INT >= 26)
             android.app.Notification.Builder(this, "bc")
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
-                .setContentTitle("Board Coach")
-                .setContentText("Mod menu aktif")
-                .build()
+                .setContentTitle("Board Coach").setContentText("Mod menu aktif").build()
         else
             @Suppress("DEPRECATION")
             android.app.Notification.Builder(this)
                 .setSmallIcon(android.R.drawable.ic_menu_compass)
-                .setContentTitle("Board Coach")
-                .setContentText("Mod menu aktif")
-                .build()
+                .setContentTitle("Board Coach").setContentText("Mod menu aktif").build()
 
         if (Build.VERSION.SDK_INT >= 34) {
             androidx.core.app.ServiceCompat.startForeground(
                 this, 1, notif,
-                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
-            )
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(1, notif)
         }
-    }
-
-    private fun captureStarted(): Boolean = capture != null
-
-    private fun requestCapture() {
-        // dipakai manual dari MainActivity; service tidak memicu activity sendiri
-        // (background activity start diblokir Android 10+).
-        val intent = Intent(this, MainActivity::class.java)
-        intent.action = "request_capture"
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        startActivity(intent)
     }
 
     private fun attachProjection(resultCode: Int, data: Intent) {
@@ -133,8 +138,7 @@ class OverlayPanelService : android.app.Service() {
             val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             val projection = mpm.getMediaProjection(resultCode, data)
             capture?.stop()
-            capture = ScreenCapture(this, projection)
-            capture?.start()
+            capture = ScreenCapture(this, projection).also { it.start() }
             setStatus("capture aktif — baca papan")
         } catch (e: Throwable) {
             CrashLogger.log(this, "attachProjection", e)
@@ -143,139 +147,250 @@ class OverlayPanelService : android.app.Service() {
         }
     }
 
-    /* ---------------- UI ---------------- */
+    /* ==================== UI ==================== */
 
-    private fun buildPanel() {
-        val panel = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = getDrawable(com.ryzellx.boardcoach.mod.R.drawable.bg_panel)
-            setPadding(14, 10, 14, 14)
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+    private fun headerBtn(label: String, onClick: () -> Unit): TextView =
+        TextView(this).apply {
+            text = label
+            textSize = 17f
+            setTextColor(0xFFE2E8F0.toInt())
+            setPadding(dp(10), dp(4), dp(10), dp(4))
+            setOnClickListener { onClick() }
         }
 
-        val title = TextView(this).apply { text = "♞ Board Coach" }
-        panel.addView(title)
+    private fun chip(label: String, on: Boolean): TextView =
+        TextView(this).apply {
+            text = label
+            textSize = 12f
+            setPadding(dp(10), dp(7), dp(10), dp(7))
+            setBackgroundResource(com.ryzellx.boardcoach.mod.R.drawable.bg_button)
+            setTextColor(0xFFE2E8F0.toInt())
+            isSelected = on
+            updateChip(this, on)
+        }
 
-        // status
-        val status = TextView(this).apply { text = "status: idle" }
-        panel.addView(status)
-        statusView = status
+    private fun updateChip(v: TextView, on: Boolean) {
+        v.setTextColor(if (on) 0xFF22C55E.toInt() else 0xFF94A3B8.toInt())
+        v.text = v.text.toString().trimStart('●', '○', ' ').let { "$it" }
+        v.text = (if (on) "● " else "○ ") + v.text
+    }
 
-        // ELO row
-        panel.addView(TextView(this).apply { text = "ELO target" })
-        val eloVal = TextView(this).apply { text = "1600"; textSize = 14f }
-        panel.addView(eloVal)
-        val eloSb = SeekBar(this).apply {
+    private fun buildPanel() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = getDrawable(com.ryzellx.boardcoach.mod.R.drawable.bg_panel)
+            setPadding(dp(12), dp(8), dp(12), dp(12))
+        }
+        val params = WindowManager.LayoutParams(
+            dp(WIDTHS_DP[widthIdx]), WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT,
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = dp(10); y = dp(140) }
+
+        /* ---- header (drag handle) ---- */
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val title = TextView(this).apply {
+            text = "♞ Board Coach"
+            textSize = 16f
+            setTextColor(0xFFE2E8F0.toInt())
+            setPadding(dp(4), dp(8), dp(4), dp(8))
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        header.addView(title)
+        header.addView(headerBtn("⤢") { cycleWidth() })
+        header.addView(headerBtn("—") { minimizeToBubble() })
+        header.addView(headerBtn("✕") { stopMod() })
+
+        var sx = 0; var sy = 0; var tx = 0f; var ty = 0f
+        val dragListener = View.OnTouchListener { _, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    sx = params.x; sy = params.y; tx = e.rawX; ty = e.rawY; true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = sx + (e.rawX - tx).toInt()
+                    params.y = sy + (e.rawY - ty).toInt()
+                    runCatching { wm.updateViewLayout(root, params) }
+                    true
+                }
+                else -> false
+            }
+        }
+        header.setOnTouchListener(dragListener)
+        title.setOnTouchListener(dragListener)
+        root.addView(header)
+
+        /* ---- body ---- */
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(4), 0, 0)
+        }
+
+        statusTv = TextView(this).apply {
+            text = "status: idle"; textSize = 12f; setTextColor(0xFF94A3B8.toInt())
+        }
+        body.addView(statusTv)
+
+        bestTv = TextView(this).apply {
+            text = "best: —"; textSize = 17f; setTextColor(0xFF22C55E.toInt())
+            setPadding(0, dp(6), 0, dp(6))
+        }
+        body.addView(bestTv)
+
+        val eloRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        eloRow.addView(TextView(this).apply {
+            text = "ELO target"; textSize = 12f; setTextColor(0xFF94A3B8.toInt())
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+        eloTv = TextView(this).apply { text = elo.toString(); textSize = 13f; setTextColor(0xFFE2E8F0.toInt()) }
+        eloRow.addView(eloTv)
+        body.addView(eloRow)
+
+        val seek = SeekBar(this).apply {
             max = 2200; progress = elo - 600
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar?, p: Int, f: Boolean) {
-                    elo = p + 600; eloVal.text = elo.toString()
-                    updateEngineProfile()
+                    elo = p + 600
+                    eloTv?.text = elo.toString()
                 }
                 override fun onStartTrackingTouch(sb: SeekBar?) {}
                 override fun onStopTrackingTouch(sb: SeekBar?) {}
             })
         }
-        panel.addView(eloSb)
+        body.addView(seek)
 
-        // toggles
-        val tEngine = makeToggle("Engine ON")
-        val tAuto = makeToggle("Auto-move")
-        val tArrows = makeToggle("Panah")
-        tEngine.setOnClickListener { engineOn = !engineOn; tEngine.isSelected = engineOn; status.text = "status: ${if (engineOn) "engine ON" else "idle"}" }
-        tAuto.setOnClickListener { autoMove = !autoMove; tAuto.isSelected = autoMove }
-        tArrows.setOnClickListener { arrowsOn = !arrowsOn; tArrows.isSelected = arrowsOn; if (!arrowsOn) arrowView?.clear() }
-        panel.addView(tEngine)
-        panel.addView(tAuto)
-        panel.addView(tArrows)
-
-        // log
-        val log = TextView(this).apply {
-            textSize = 11f
-            setTextColor(0xFF94A3B8.toInt())
-            maxLines = 8
-            isVerticalScrollBarEnabled = true
+        val chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        chipEngine = chip("Engine", engineOn).apply {
+            setOnClickListener {
+                engineOn = !engineOn
+                updateChip(this, engineOn)
+                if (engineOn) ensureEngine()
+                setStatus(if (engineOn) "engine ON" else "engine OFF")
+            }
         }
-        panel.addView(log, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 140))
-        logView = log
-
-        val scroll = ScrollView(this)
-        scroll.addView(panel)
-
-        val params = WindowManager.LayoutParams(
-            300, WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT,
-        ).apply {
-            gravity = Gravity.TOP or Gravity.END
-            x = -20; y = 120
+        chipAuto = chip("Auto-move", autoMove).apply {
+            setOnClickListener { autoMove = !autoMove; updateChip(this, autoMove) }
         }
+        chipArrows = chip("Panah", arrowsOn).apply {
+            setOnClickListener {
+                arrowsOn = !arrowsOn; updateChip(this, arrowsOn)
+                if (!arrowsOn) main.post { arrowView?.clear() }
+            }
+        }
+        listOf(chipEngine!!, chipAuto!!, chipArrows!!).forEach {
+            it.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    .apply { marginEnd = dp(4) }
+            chips.addView(it)
+        }
+        body.addView(chips)
 
-        // drag handle
-        val drag = TextView(this).apply { text = "≡"; textSize = 20f }
-        panel.addView(drag, 0)
+        val btnRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val calBtn = TextView(this).apply {
+            text = "Kalibrasi papan"; textSize = 12f
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setBackgroundResource(com.ryzellx.boardcoach.mod.R.drawable.bg_button)
+            setTextColor(0xFFE2E8F0.toInt())
+            setOnClickListener { startCalibration() }
+        }
+        val statsBtn = TextView(this).apply {
+            text = "Statistik"; textSize = 12f
+            setPadding(dp(10), dp(8), dp(10), dp(8))
+            setBackgroundResource(com.ryzellx.boardcoach.mod.R.drawable.bg_button)
+            setTextColor(0xFFE2E8F0.toInt())
+            setOnClickListener {
+                statsVisible = !statsVisible
+                statsTv?.visibility = if (statsVisible) View.VISIBLE else View.GONE
+                updateStatsUi()
+            }
+        }
+        listOf(calBtn, statsBtn).forEach {
+            it.layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                    .apply { marginEnd = dp(4) }
+            btnRow.addView(it)
+        }
+        body.addView(btnRow)
 
-        val container = FrameLayout(this)
-        container.addView(scroll)
-        val close = Button(this).apply { text = "—" }
-        container.addView(close, FrameLayout.LayoutParams(60, 60, Gravity.TOP or Gravity.END))
+        statsTv = TextView(this).apply {
+            textSize = 11f; setTextColor(0xFFCBD5E1.toInt())
+            visibility = View.GONE
+            setPadding(0, dp(6), 0, dp(4))
+        }
+        body.addView(statsTv)
 
-        wm.addView(container, params)
-        this.panel = container
+        logTv = TextView(this).apply {
+            textSize = 10f; setTextColor(0xFF64748B.toInt())
+            maxLines = 6
+            setPadding(0, dp(4), 0, 0)
+        }
+        body.addView(logTv)
 
-        // chevron (minimized)
+        root.addView(body)
+
+        wm.addView(root, params)
+        panelRoot = root
+        panelParams = params
+
+        buildBubble()
+    }
+
+    private fun buildBubble() {
         val ch = FrameLayout(this).apply {
             background = getDrawable(com.ryzellx.boardcoach.mod.R.drawable.bg_button)
         }
-        val chTxt = TextView(this).apply { text = "♞"; textSize = 24f }
-        ch.addView(chTxt, FrameLayout.LayoutParams(70, 70, Gravity.CENTER))
-        ch.setOnClickListener { container.visibility = View.VISIBLE; ch.visibility = View.GONE }
-        wm.addView(ch, WindowManager.LayoutParams(
-            70, 70, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+        ch.addView(TextView(this).apply { text = "♞"; textSize = 24f; setTextColor(0xFF22C55E.toInt()) },
+            FrameLayout.LayoutParams(dp(56), dp(56), Gravity.CENTER))
+        val bp = WindowManager.LayoutParams(
+            dp(56), dp(56), WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT,
-        ).apply { gravity = Gravity.TOP or Gravity.END; x = -16; y = 140 })
-        chevron = ch
+        ).apply { gravity = Gravity.TOP or Gravity.START; x = dp(10); y = dp(140) }
 
-        close.setOnClickListener {
-            container.visibility = View.GONE
-            chevron?.visibility = View.VISIBLE
-        }
-
-        // drag
-        container.setOnTouchListener { _, e ->
-            if (e.action == MotionEvent.ACTION_MOVE) {
-                params.x = e.rawX.toInt() - container.width / 2
-                params.y = e.rawY.toInt() - 40
-                wm.updateViewLayout(container, params)
+        var sx = 0; var sy = 0; var tx = 0f; var ty = 0f; var moved = false
+        ch.setOnTouchListener { _, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    sx = bp.x; sy = bp.y; tx = e.rawX; ty = e.rawY; moved = false; true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (Math.abs(e.rawX - tx) > dp(8) || Math.abs(e.rawY - ty) > dp(8)) moved = true
+                    bp.x = sx + (e.rawX - tx).toInt()
+                    bp.y = sy + (e.rawY - ty).toInt()
+                    runCatching { wm.updateViewLayout(ch, bp) }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!moved) { ch.visibility = View.GONE; panelRoot?.visibility = View.VISIBLE }
+                    true
+                }
+                else -> false
             }
-            true
         }
-
-        println("BC panel built")
+        ch.visibility = View.GONE
+        wm.addView(ch, bp)
+        bubble = ch
+        bubbleParams = bp
     }
 
-    private fun makeToggle(s: String): TextView = TextView(this).apply {
-        text = "• $s"
-        setBackgroundResource(com.ryzellx.boardcoach.mod.R.drawable.bg_button)
-        setPadding(14, 10, 14, 10)
-        setTextColor(0xFFE2E8F0.toInt())
-        isSelected = false
+    private fun cycleWidth() {
+        widthIdx = (widthIdx + 1) % WIDTHS_DP.size
+        val p = panelParams ?: return
+        p.width = dp(WIDTHS_DP[widthIdx])
+        runCatching { panelRoot?.let { wm.updateViewLayout(it, p) } }
     }
 
-    /** Update baris status di panel (aman dipanggil dari thread mana pun). */
-    private fun setStatus(s: String) {
-        handler.post {
-            statusView?.text = "status: $s"
-        }
+    private fun minimizeToBubble() {
+        panelRoot?.visibility = View.GONE
+        bubble?.visibility = View.VISIBLE
     }
 
-    /** Tambah baris ke log panel, maksimum 8 baris. */
-    private fun logLine(s: String) {
-        handler.post {
-            val v = logView ?: return@post
-            val lines = (v.text.toString().split("\n") + s).filter { it.isNotBlank() }
-            v.text = lines.takeLast(8).joinToString("\n")
-        }
+    private fun stopMod() {
+        Toast.makeText(this, "Board Coach dihentikan", Toast.LENGTH_SHORT).show()
+        stopSelf()
     }
 
     private fun ensureArrowOverlay() {
@@ -283,116 +398,189 @@ class OverlayPanelService : android.app.Service() {
         val view = ArrowOverlayView(this)
         val fl = FrameLayout(this)
         fl.addView(view)
-        fl.isClickable = false
-        fl.isFocusable = false
+        fl.isClickable = false; fl.isFocusable = false
         wm.addView(fl, WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                    or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT,
-        ))
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT))
         arrowOverlay = fl
         arrowView = view
     }
 
-    /* ---------------- scan loop ---------------- */
+    private fun startCalibration() {
+        if (calibrateOverlay != null) return
+        minimizeToBubbleKeepPanelHidden()
+        val v = CalibrateView(this,
+            onDone = { rect ->
+                calibrator.clear()
+                calibrator.calibrate(rect)
+                removeCalibration()
+                setStatus("papan terkalibrasi ${rect.width()}x${rect.height()}")
+                logLine("kalibrasi ok")
+            },
+            onCancel = { removeCalibration() })
+        wm.addView(v, WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            PixelFormat.TRANSLUCENT))
+        calibrateOverlay = v
+        setStatus("kalibrasi: tap 2 pojok papan")
+    }
+
+    private fun minimizeToBubbleKeepPanelHidden() { panelRoot?.visibility = View.GONE }
+
+    private fun removeCalibration() {
+        runCatching { calibrateOverlay?.let { wm.removeView(it) } }
+        calibrateOverlay = null
+        panelRoot?.visibility = View.VISIBLE
+    }
+
+    /** Update status (aman dari thread mana pun). */
+    private fun setStatus(s: String) { main.post { statusTv?.text = "status: $s" } }
+
+    private fun logLine(s: String) {
+        main.post {
+            val v = logTv ?: return@post
+            val lines = (v.text.toString().split("\n") + s).filter { it.isNotBlank() }
+            v.text = lines.takeLast(6).joinToString("\n")
+        }
+    }
+
+    private fun updateStatsUi() {
+        main.post { statsTv?.text = stats.summary() }
+    }
+
+    private fun setBestUi(text: String) { main.post { bestTv?.text = text } }
+
+    /* ==================== engine ==================== */
+
+    private fun ensureEngine() {
+        if (engine == null) {
+            val e = EngineClient(applicationContext)
+            engine = e
+            e.start() // main thread
+            setStatus("engine memuat…")
+        }
+    }
+
+    /* ==================== scan loop (WORKER) ==================== */
 
     private fun startScan() {
-        val token = ++pollToken
-        val runnable = object : Runnable {
+        scanRunning = true
+        val token = ++scanToken
+        work.post(object : Runnable {
             override fun run() {
-                if (pollToken != token || !scanRunning) return
-                try { tick() } catch (e: Exception) { /* noop */ }
-                handler.postDelayed(this, 450)
+                if (!scanRunning || scanToken != token) return
+                try { tick() } catch (e: Throwable) { CrashLogger.log(this@OverlayPanelService, "tick", e) }
+                work.postDelayed(this, 400)
             }
-        }
-        handler.post(runnable)
+        })
     }
 
     private fun tick() {
         val cap = capture ?: return
         val bmp = cap.grab() ?: return
-        val w = bmp.width; val h = bmp.height
-        calibrator.setScreen(w, h)
-        val rect = BoardReader.findBoard(bmp)
-        if (rect != null) calibrator.calibrate(rect)
 
-        val fen = try { BoardReader.readFen(bmp) } catch (e: Exception) { null } ?: return
-        val changed = BoardCalibrator.fenChanged(lastFen ?: "", fen)
-        if (changed) {
-            lastFen = fen
-            logLine("fen ${fen.take(24)}")
-            if (engineOn) requestMove(fen)
+        val rect = calibrator.rect ?: BoardReader.findBoard(bmp)
+        if (rect == null) { setStatus("papan tidak ketemu — tap Kalibrasi papan"); return }
+        calibrator.calibrate(rect)
+
+        val fen = try { BoardReader.readFenFrom(bmp, rect) } catch (e: Exception) { null } ?: return
+        if (fen == lastFen) return
+
+        val prev = lastFen
+        val prevBest = lastBest
+        val prevCp = lastCp
+        lastFen = fen
+        setStatus("papan ok")
+
+        // klasifikasi langkah yang baru saja dimainkan
+        val eng = engine
+        if (prev != null && prevBest != null && eng != null && eng.isReady) {
+            val played = FenDiff.playedMove(prev, fen)
+            if (played != null && played != lastAutoMove) {
+                val res = eng.analyze(fen, 250, 8, 3000)
+                val cpOpp = res?.cp
+                val cpAfterOurs = if (cpOpp != null) -cpOpp else null
+                val loss = if (prevCp != null && cpAfterOurs != null)
+                    (prevCp - cpAfterOurs).coerceAtLeast(0.0) else 0.0
+                val cat = Classifier.classify(
+                    cpBefore = prevCp ?: 0.0,
+                    cpAfter = cpAfterOurs ?: 0.0,
+                    legalCount = 20, isBook = false,
+                    playedUci = played, bestUci = prevBest, secondGap = 0.0,
+                    matBefore = 0, matAfter = 0)
+                stats.add(cat, loss)
+                updateStatsUi()
+                setBestUi("terakhir ${played}  ${cat.glyph} ${cat.label}")
+                logLine("main $played -> ${cat.label}")
+            }
         }
+
+        if (engineOn) requestMove(fen)
     }
 
     private fun requestMove(fen: String) {
-        val prof = EloProfile.forElo(elo)
-        if (engine == null && engineOn) {
-            engine = EngineClient(this, prof)
-            engine?.start()
-        }
         val eng = engine ?: return
-        val mv = eng.bestMove(fen, prof.movetime, prof.depth) ?: return
-        lastBest = mv
-        bestMoveShown = true
-        logLine("best $mv")
-        if (mv.length >= 4) {
-            val from = mv.substring(0, 2)
-            val to = mv.substring(2, 4)
-            if (arrowsOn) drawArrow(from, to, 0xFF81B64C.toInt())
+        if (!eng.isReady) { setStatus("engine memuat…"); return }
+        val prof = EloProfile.forElo(elo)
+        val res = eng.analyzeWithSkill(fen, prof.skill, prof.movetime, prof.depth, 8000) ?: return
+        lastBest = res.best
+        lastCp = res.cp
+        val cpTxt = res.cp?.let { " (${it.toInt()})" } ?: ""
+        setBestUi("best ${res.best}$cpTxt")
+        logLine("best ${res.best}")
+
+        if (res.best.length >= 4) {
+            val from = res.best.substring(0, 2)
+            val to = res.best.substring(2, 4)
+            val color = when {
+                res.cp != null && res.cp > 200 -> 0xFF22C55E.toInt()
+                res.cp != null && res.cp < -200 -> 0xFFEF4444.toInt()
+                else -> 0xFF38BDF8.toInt()
+            }
+            if (arrowsOn) drawArrow(from, to, color)
             if (autoMove) scheduleAutoMove(from, to)
         }
     }
 
     private fun drawArrow(from: String, to: String, color: Int) {
-        val av = arrowView ?: return
-        val f = from[0] - 'a'
-        val r = from[1] - '1'
-        val t = to[0] - 'a'
-        val tr = to[1] - '1'
+        val f = from[0] - 'a'; val r = from[1] - '1'
+        val t = to[0] - 'a'; val tr = to[1] - '1'
         val s1 = calibrator.squareCenter(f, r) ?: return
         val s2 = calibrator.squareCenter(t, tr) ?: return
-        av.setArrows(listOf(ArrowOverlayView.Arrow(s1.first.toFloat(), s1.second.toFloat(), s2.first.toFloat(), s2.second.toFloat(), color)))
+        main.post {
+            arrowView?.setArrows(listOf(ArrowOverlayView.Arrow(
+                s1.first.toFloat(), s1.second.toFloat(),
+                s2.first.toFloat(), s2.second.toFloat(), color)))
+        }
     }
 
     private fun scheduleAutoMove(from: String, to: String) {
-        handler.postDelayed({
-            val f = from[0] - 'a'
-            val r = from[1] - '1'
-            val t = to[0] - 'a'
-            val tr = to[1] - '1'
-            val s1 = calibrator.squareCenter(f, r)
-            val s2 = calibrator.squareCenter(t, tr)
-            if (s1 != null && s2 != null) {
-                val svc = BoardReaderService.service
-                if (svc != null) {
-                    svc.tap(s1.first, s1.second)
-                    handler.postDelayed({ svc.tap(s2.first, s2.second) }, 120)
-                }
-            }
+        val svc = BoardReaderService.service ?: return
+        main.postDelayed({
+            val s1 = calibrator.squareCenter(from[0] - 'a', from[1] - '1') ?: return@postDelayed
+            val s2 = calibrator.squareCenter(to[0] - 'a', to[1] - '1') ?: return@postDelayed
+            lastAutoMove = from + to
+            svc.tap(s1.first, s1.second)
+            main.postDelayed({ svc.tap(s2.first, s2.second) }, 140)
         }, moveDelay)
-    }
-
-    private fun updateEngineProfile() {
-        // restart engine dengan profil baru kalau perlu
-        val old = engine
-        if (old != null && engineOn) {
-            old.close()
-            engine = null
-        }
     }
 
     override fun onDestroy() {
         scanRunning = false
-        pollToken++
-        capture?.stop()
-        engine?.close()
-        runCatching { panel?.let { wm.removeView(it) } }
-        runCatching { chevron?.let { wm.removeView(it) } }
+        scanToken++
+        runCatching { capture?.stop() }
+        runCatching { engine?.close() }
+        runCatching { panelRoot?.let { wm.removeView(it) } }
+        runCatching { bubble?.let { wm.removeView(it) } }
         runCatching { arrowOverlay?.let { wm.removeView(it) } }
+        runCatching { calibrateOverlay?.let { wm.removeView(it) } }
+        runCatching { workerThread.quitSafely() }
         super.onDestroy()
     }
 }

@@ -17,6 +17,9 @@ class BoardCalibrator {
     }
 
     val isCalibrated: Boolean get() = boardRect != null
+    val rect: Rect? get() = boardRect
+
+    fun clear() { boardRect = null }
 
     /** Konversi petak → titik pusat layar. @@=0..7 (a=0), rank=0..7 (rank1=0). */
     fun squareCenter(file: Int, rank: Int): Pair<Int, Int>? {

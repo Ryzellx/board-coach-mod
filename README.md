@@ -12,13 +12,15 @@ menggambar panah saran, dan (opsional) memainkan langkah otomatis.
 
 | Fitur | Status |
 |---|---|
-| Floating mod menu (draggable, collapsible) | v1.0 |
+| Panel floating: **drag** dari header, **minimize ke bubble ♞**, **3 ukuran (⤢)**, tombol stop (✕) | v1.1 |
+| Scan + engine di **worker thread** (UI tidak freeze) | v1.1 |
+| **Indikator best move** live + warna panah sesuai evaluasi | v1.1 |
+| **Statistik**: jumlah langkah, akurasi %, hitungan per kategori | v1.1 |
+| **Kalibrasi manual papan** (tap 2 pojok) — panah andal tanpa auto-detect | v1.1 |
+| Klasifikasi langkah (diff FEN + eval engine) | v1.1 |
 | Engine Stockfish asm.js di WebView tersembunyi (worker) | v1.0 |
-| Profil ELO 600–2800 (Skill Level + movetime) | v1.0 |
-| Baca papan dari screenshot (MediaProjection) | v1.0 |
-| Panah saran di atas layar | v1.0 |
 | Auto-move via Accessibility gesture tap | v1.0 |
-| Klasifikasi langkah (Brilliant…Blunder) — port `classify.js` | v1.0 |
+| Crash logger + tombol kirim log | v1.0.2 |
 
 ## Izin
 

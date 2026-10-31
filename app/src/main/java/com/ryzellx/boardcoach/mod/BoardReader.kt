@@ -79,9 +79,14 @@ object BoardReader {
         return if (bestScore > 0.35) best else null
     }
 
-    /** Baca FEN penuh dari bitmap. */
+    /** Baca FEN penuh dari bitmap (auto-deteksi papan). */
     fun readFen(bitmap: Bitmap): String {
         val board = findBoard(bitmap) ?: throw BoardException("papan tidak ketemu")
+        return readFenFrom(bitmap, board)
+    }
+
+    /** Baca FEN dengan rect papan eksplisit (hasil kalibrasi manual). */
+    fun readFenFrom(bitmap: Bitmap, board: android.graphics.Rect): String {
         val side = board.width().toDouble() / SIZE
 
         val pieces = ArrayList<Pair<Square, Piece>>()
